@@ -1,94 +1,4 @@
-import os
 import asyncio
-import logging
-from flask import Flask
-from threading import Thread
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.request import HTTPXRequest
-
-# Logging setup - ნაკლები verbose ლოგები
-logging.basicConfig(level=logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('telegram').setLevel(logging.WARNING)
-
-# Flask app Render.com port-ისთვის
-app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return "Bot is running!"
-
-@app.route('/health')
-def health():
-    return {"status": "healthy"}
-
-# Telegram Bot Setup
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-
-# Improved request configuration
-request = HTTPXRequest(
-    connection_pool_size=8,
-    read_timeout=30,
-    write_timeout=30,
-    connect_timeout=30,
-    pool_timeout=30
-)
-
-# Bot handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Hello! Bot is working on Render.com!')
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log errors caused by Updates."""
-    logging.error(f'Update {update} caused error {context.error}')
-
-# Bot setup function
-async def setup_bot():
-    """Setup and run the bot"""
-    try:
-        # Clear any existing webhooks
-        application = Application.builder().token(TOKEN).request(request).build()
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        
-        # Add handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_error_handler(error_handler)
-        
-        # Start polling
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
-        
-        # Keep running
-        while True:
-            await asyncio.sleep(1)
-            
-    except Exception as e:
-        logging.error(f"Bot setup error: {e}")
-        await asyncio.sleep(5)  # Wait before retry
-        await setup_bot()  # Retry
-
-def run_bot():
-    """Run bot in asyncio loop"""
-    asyncio.run(setup_bot())
-
-def run_flask():
-    """Run Flask app"""
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
-
-if __name__ == "__main__":
-    # Start Flask in separate thread
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    # Start bot
-    import asyncio
 import aiohttp
 import ssl
 import certifi
@@ -103,9 +13,10 @@ from urllib.parse import urljoin, urlparse
 import os
 import signal
 import sys
-from flask import Flask
 from threading import Thread
 import gc
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
 
 # ლოგინგის კონფიგურაცია - ნაკლები verbose
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.WARNING)
@@ -113,20 +24,28 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Flask app Render.com port-ისთვის
-app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return {"status": "Bot is running!", "service": "Product Search Bot"}
-
-@app.route('/health')
-def health():
-    return {"status": "healthy", "uptime": "running"}
-
-@app.route('/status')
-def status():
-    return {"bot_status": "active", "version": "1.0"}
+# Simple HTTP Server for Render.com port binding
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {"status": "Bot is running!", "service": "Product Search Bot"}
+            self.wfile.write(json.dumps(response).encode())
+        elif self.path == '/status':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {"bot_status": "active", "version": "1.0"}
+            self.wfile.write(json.dumps(response).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Suppress server logs
+        pass
 
 class ProductBot:
     def __init__(self, bot_token):
@@ -738,11 +657,12 @@ def run_bot(bot_token):
     """Run bot in asyncio loop"""
     asyncio.run(setup_bot(bot_token))
 
-def run_flask():
-    """Run Flask app for Render.com port binding"""
+def run_http_server():
+    """Run simple HTTP server for Render.com port binding"""
     port = int(os.environ.get('PORT', 5000))
-    logger.warning(f"🌐 Starting Flask server on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    logger.warning(f"🌐 Starting HTTP server on port {port}")
+    server.serve_forever()
 
 def main():
     """ბოტის გაშვება Render.com-ისთვის ოპტიმიზებული"""
@@ -755,11 +675,11 @@ def main():
     
     print("🚀 Starting bot on Render.com...")
     
-    # Start Flask in separate thread for Render.com port detection
-    flask_thread = Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    # Start HTTP server in separate thread for Render.com port detection
+    server_thread = Thread(target=run_http_server, daemon=True)
+    server_thread.start()
     
-    # Give Flask time to start
+    # Give server time to start
     import time
     time.sleep(2)
     
@@ -784,4 +704,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    run_bot()
