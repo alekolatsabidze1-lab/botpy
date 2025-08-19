@@ -3,3 +3,5 @@ aiohttp==3.9.1
 beautifulsoup4==4.12.2
 certifi==2023.11.17
 lxml==4.9.3
+Brotli==1.0.9
+
