@@ -44,10 +44,14 @@ class ProductBot:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'ka-GE,ka;q=0.9,en;q=0.8,ru;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Encoding': 'gzip, deflate, br',  # brotli მხარდაჭერა
                 'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Cache-Control': 'max-age=0'
             }
         )
     
@@ -57,20 +61,94 @@ class ProductBot:
             await self.session.close()
     
     async def fetch_website_content(self, url):
-        """საიტიდან კონტენტის მოპოვება"""
+        """საიტიდან კონტენტის მოპოვება SSL მხარდაჭერით"""
         try:
             if not self.session:
                 await self.init_session()
-                
-            async with self.session.get(url) as response:
-                if response.status == 200:
-                    content = await response.text()
-                    return content
-                else:
-                    logger.error(f"HTTP Error {response.status} for URL: {url}")
-                    return None
+            
+            # URL-ის ნორმალიზაცია
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            
+            # Brotli compression მხარდაჭერისთვის
+            headers = {
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            }
+            
+            # პირველ რიგში HTTPS-ის მცდელობა
+            if url.startswith('http://'):
+                https_url = url.replace('http://', 'https://', 1)
+                try:
+                    async with self.session.get(https_url, headers=headers) as response:
+                        if response.status == 200:
+                            content = await response.text(encoding='utf-8', errors='ignore')
+                            return content
+                except Exception as e:
+                    logger.warning(f"HTTPS failed for {https_url}: {e}, trying HTTP...")
+            
+            # ძირითადი მცდელობა
+            try:
+                async with self.session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        content = await response.text(encoding='utf-8', errors='ignore')
+                        return content
+                    elif response.status in [301, 302, 303, 307, 308]:
+                        # Redirect handling
+                        redirect_url = str(response.url)
+                        logger.info(f"Redirected to: {redirect_url}")
+                        async with self.session.get(redirect_url, headers=headers) as redirect_response:
+                            if redirect_response.status == 200:
+                                content = await redirect_response.text(encoding='utf-8', errors='ignore')
+                                return content
+                    else:
+                        logger.error(f"HTTP Error {response.status} for URL: {url}")
+                        return None
+                        
+            except aiohttp.ContentTypeError as cte_error:
+                logger.warning(f"Content-Type error for {url}, trying without encoding: {cte_error}")
+                # Content-Type error-ის შემთხვევაში encoding-ის გარეშე
+                async with self.session.get(url, headers={'Accept-Encoding': 'identity'}) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        return content.decode('utf-8', errors='ignore')
+                    
+        except aiohttp.ClientSSLError as ssl_error:
+            logger.error(f"SSL Error for {url}: {ssl_error}")
+            # SSL შეცდომის შემთხვევაში HTTP-ის მცდელობა
+            if url.startswith('https://'):
+                http_url = url.replace('https://', 'http://', 1)
+                try:
+                    async with self.session.get(http_url, headers={'Accept-Encoding': 'gzip, deflate'}) as response:
+                        if response.status == 200:
+                            content = await response.text(encoding='utf-8', errors='ignore')
+                            logger.warning(f"Fallback to HTTP successful for {http_url}")
+                            return content
+                except Exception as e:
+                    logger.error(f"HTTP fallback also failed: {e}")
+            return None
+            
+        except aiohttp.ClientConnectorError as conn_error:
+            logger.error(f"Connection Error for {url}: {conn_error}")
+            return None
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout Error for URL: {url}")
+            return None
+            
         except Exception as e:
-            logger.error(f"Error fetching {url}: {str(e)}")
+            logger.error(f"Unexpected error fetching {url}: {str(e)}")
+            # ბოლო მცდელობა - ყველაზე მარტივი მიდგომა
+            try:
+                simple_headers = {'Accept-Encoding': 'identity', 'User-Agent': 'TelegramBot/1.0'}
+                async with self.session.get(url, headers=simple_headers) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        return content.decode('utf-8', errors='ignore')
+            except Exception as final_error:
+                logger.error(f"Final fallback failed for {url}: {final_error}")
             return None
     
     def parse_products(self, html_content, base_url):
@@ -78,23 +156,58 @@ class ProductBot:
         soup = BeautifulSoup(html_content, 'html.parser')
         products = []
         
-        # ესაა მაგალითი - შეცვალეთ თქვენი საიტის სტრუქტურის მიხედვით
-        product_selectors = [
-            '.product',
-            '.item',
-            '.product-item',
-            '.product-card',
-            '[class*="product"]'
-        ]
+        # raiders.ge-სთვის სპეციალური სელექტორები
+        if 'raiders.ge' in base_url:
+            product_selectors = [
+                '.product-item',
+                '.product-card',
+                '.item-product',
+                '.product-container',
+                '.card',
+                '[data-product-id]',
+                '.product-list-item'
+            ]
+        else:
+            # ზოგადი სელექტორები
+            product_selectors = [
+                '.product',
+                '.item',
+                '.product-item',
+                '.product-card',
+                '[class*="product"]',
+                '.card',
+                '.item-card'
+            ]
         
         for selector in product_selectors:
             items = soup.select(selector)
-            if items:
+            if items and len(items) > 1:  # მინიმუმ 2 პროდუქტი უნდა მოიძებნოს
                 for item in items[:10]:  # მაქსიმუმ 10 პროდუქტი
                     product = self.extract_product_info(item, base_url)
                     if product:
                         products.append(product)
-                break
+                if products:  # თუ პროდუქტები მოიძებნა, შევწყვიტოთ
+                    break
+        
+        # თუ პროდუქტები ვერ მოიძებნა, ვეცადოთ ყველაზე ფართო ძებნა
+        if not products:
+            fallback_selectors = [
+                'div[class*="item"]',
+                'div[class*="card"]', 
+                'div[class*="product"]',
+                'article',
+                'li[class*="item"]'
+            ]
+            
+            for selector in fallback_selectors:
+                items = soup.select(selector)
+                if items:
+                    for item in items[:15]:
+                        product = self.extract_product_info(item, base_url)
+                        if product:
+                            products.append(product)
+                    if products:
+                        break
         
         return products
     
@@ -266,25 +379,29 @@ class ProductBot:
                 logger.error(f"Error sending product {i}: {str(e)}")
                 continue
     
-    def is_valid_image_url(self, url):
-        """სურათის URL-ის ვალიდაცია"""
-        if not url:
-            return False
-        
-        # ფაილის ექსტენშენის შემოწმება
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
-        url_lower = url.lower()
-        
-        # URL-ში სურათის ექსტენშენია
-        if any(url_lower.endswith(ext) for ext in image_extensions):
-            return True
-        
-        # ან სურათის ქვეჯგუფი URL-ში
-        image_indicators = ['image', 'img', 'photo', 'picture', 'pic']
-        if any(indicator in url_lower for indicator in image_indicators):
-            return True
+    async def check_ssl_certificate(self, url):
+        """SSL სერტიფიკატის შემოწმება"""
+        try:
+            parsed_url = urlparse(url)
+            if parsed_url.scheme != 'https':
+                return True  # HTTP საიტებისთვის SSL შემოწმება არ ჭირდება
             
-        return False
+            import socket
+            import ssl as ssl_module
+            
+            context = ssl_module.create_default_context()
+            
+            with socket.create_connection((parsed_url.hostname, 443), timeout=10) as sock:
+                with context.wrap_socket(sock, server_hostname=parsed_url.hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    if cert:
+                        logger.info(f"SSL Certificate valid for {parsed_url.hostname}")
+                        return True
+            return False
+            
+        except Exception as e:
+            logger.warning(f"SSL check failed for {url}: {e}")
+            return False  # SSL შემოწმება ვერ მოხერხდა, მაგრამ გავაგრძელოთ
 
 # ბოტის კომანდები
 class TelegramBot:
@@ -355,12 +472,23 @@ class TelegramBot:
             if not self.product_bot.session:
                 await self.product_bot.init_session()
             
+            # SSL შემოწმება (HTTPS საიტებისთვის)
+            ssl_status = "🔐" if url.startswith('https://') else "🔓"
+            if url.startswith('https://'):
+                await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status} SSL შემოწმება")
+                ssl_valid = await self.product_bot.check_ssl_certificate(url)
+                ssl_status = "✅🔐" if ssl_valid else "⚠️🔐"
+            
+            await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status}")
+            
             # საიტის კონტენტის მოპოვება
             html_content = await self.product_bot.fetch_website_content(url)
             
             if not html_content:
                 await search_message.edit_text("❌ საიტის ჩატვირთვა ვერ მოხერხდა")
                 return
+            
+            await search_message.edit_text(f"🔍 ვანალიზებ პროდუქციას... {ssl_status}")
             
             # პროდუქციის პარსინგი
             products = self.product_bot.parse_products(html_content, url)
@@ -369,7 +497,7 @@ class TelegramBot:
             await search_message.delete()
             
             # შედეგების ფორმატირება და გაგზავნა სურათებით
-            website_name = urlparse(url).netloc
+            website_name = f"{ssl_status} {urlparse(url).netloc}"
             await self.send_products_with_images(update, products, website_name)
             
         except Exception as e:
