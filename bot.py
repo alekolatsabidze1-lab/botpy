@@ -258,19 +258,23 @@ class ProductBot:
                         r'(\d+(?:,\d{3})*(?:\.\d{2})?)'  # მხოლოდ რიცხვი
                     ]
                     
-                    for pattern in price_patterns:
-                        price_match = re.search(pattern, price_text.replace(' ', ''))
-                        if price_match:
-                            price = price_match.group(1).replace(',', '')
-                            # ლარის სიმბოლო დავამატოთ თუ არ არის
-                            if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+           for pattern in price_patterns:
+    price_match = re.search(pattern, price_text.replace(' ', ''))
+    if price_match:
+        price = price_match.group(1).replace(',', '')
+        # ლარის სიმბოლო დავამატოთ თუ არ არის
+        if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+            price = f"{price}₾"  # ან price += "₾"
+        break
+if price:
+    # აქ შეგიძლიათ დამატებითი ლოგიკა დაწეროთ
+    pass
 
-    
-    def is_valid_image_url(self, url):
-        """სურათის URL-ის ვალიდაცია"""
-        if not url or len(url) < 10:
-            return False
-        
+def is_valid_image_url(self, url):
+    """სურათის URL-ის ვალიდაცია"""
+    if not url or len(url) < 10:
+        return False
+    # დანარჩენი კოდი...
         # ფაილის ექსტენშენის შემოწმება
         image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']
         url_lower = url.lower()
@@ -1009,6 +1013,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
