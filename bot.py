@@ -636,6 +636,129 @@ class TelegramBot:
                 "✅ HTTP საიტები\n"
                 "✅ ყველა სტანდარტული ecommerce სტრუქტურა\n\n"
                 "🚀 *Hosted on Render.com*"
+                "დაწყებისთვის აირჩიეთ ღილაკი:"
+        )
+        
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Search კომანდა"""
+        if not context.args:
+            await update.message.reply_text(
+                "❗ გთხოვთ მიუთითოთ საიტის URL\n\nმაგალითი: `/search https://example.com`", 
+                parse_mode='Markdown'
+            )
+            return
+        
+        url = context.args[0]
+        await self.process_website(update, url)
+    
+    async def handle_url_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """URL შეტყობინების დამუშავება"""
+        text = update.message.text
+        
+        url_pattern = r'https?://[^\s]+'
+        urls = re.findall(url_pattern, text)
+        
+        if urls:
+            await self.process_website(update, urls[0])
+        else:
+            # ვეცადოთ URL-ის ამოცნობა www. ან domain.com ფორმატით
+            domain_pattern = r'(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}'
+            domains = re.findall(domain_pattern, text)
+            
+            if domains:
+                url = 'https://' + domains[0]
+                await self.process_website(update, url)
+            else:
+                await update.message.reply_text("❗ გთხოვთ გამოაგზავნოთ ვალიდური URL ან domain")
+    
+    async def process_website(self, update, url):
+        """საიტის დამუშავება"""
+        try:
+            parsed_url = urlparse(url)
+            if not parsed_url.scheme:
+                url = 'https://' + url
+            elif parsed_url.scheme not in ['http', 'https']:
+                await update.message.reply_text("❗ გთხოვთ გამოიყენოთ HTTP ან HTTPS URL")
+                return
+        except Exception:
+            await update.message.reply_text("❗ არასწორი URL ფორმატი")
+            return
+        
+        search_message = await update.message.reply_text("🔍 ვძებნი პროდუქციას...")
+        
+        try:
+            if not self.product_bot.session:
+                await self.product_bot.init_session()
+            
+            # SSL სტატუსის მიღება
+            ssl_status = await self.product_bot.get_ssl_status_display(url)
+            
+            await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status}")
+            
+            html_content = await self.product_bot.fetch_website_content(url)
+            
+            if not html_content:
+                await search_message.edit_text(f"❌ საიტის ჩატვირთვა ვერ მოხერხდა\n{ssl_status}")
+                return
+            
+            await search_message.edit_text(f"🔍 ვანალიზებ პროდუქციას... {ssl_status}")
+            
+            products = self.product_bot.parse_products(html_content, url)
+            
+            await search_message.delete()
+            
+            website_name = f"{ssl_status} {urlparse(url).netloc}"
+            await self.product_bot.send_products_with_images(update, products, website_name)
+            
+        except Exception as e:
+            logger.error(f"Error processing website: {str(e)}")
+            await search_message.edit_text("❌ პროდუქციის ძებნისას მოხდა შეცდომა")
+    
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """ღილაკების callback"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == 'search_products':
+            await query.edit_message_text(
+                "🔍 გთხოვთ გამოაგზავნოთ საიტის URL რომლიდანაც გსურთ პროდუქციის ძებნა:\n\n"
+                "მაგალითად:\n"
+                "• `https://example.com`\n"
+                "• `http://shop.example.com`\n"
+                "• `example.com` (ავტომატურად დაემატება https://)\n\n"
+                "🔧 *მხარდაჭერილი ტიპები:*\n"
+                "✅ HTTPS (ვალიდური SSL)\n"
+                "✅ HTTPS (არავალიდური SSL)\n"
+                "✅ HTTP საიტები\n"
+                "✅ Self-signed certificates",
+                parse_mode='Markdown'
+            )
+        elif query.data == 'help':
+            help_text = (
+                "📖 *დახმარების სექცია*\n\n"
+                "🔹 *კომანდები:*\n"
+                "• `/start` - ბოტის გაშვება\n"
+                "• `/search <URL>` - პროდუქციის ძებნა\n"
+                "• `/help` - დახმარება\n\n"
+                "🔹 *გამოყენება:*\n"
+                "1. გამოაგზავნეთ საიტის URL\n"
+                "2. ბოტი გადავა საიტზე\n"
+                "3. მოიძიებს პროდუქციასა და ფასებს\n"
+                "4. გამოაგზავნის ინფორმაციას ჩატში\n\n"
+                "🔹 *SSL მხარდაჭერა:*\n"
+                "• 🔒 - ვალიდური SSL სერთიფიკატი\n"
+                "• ⚠️ - SSL შეცდომები (მაგრამ მუშაობს)\n"
+                "• 🔓 - HTTP (არაუსაფრთხო)\n\n"
+                "🔹 *მხარდაჭერილი საიტების ტიპები:*\n"
+                "✅ HTTPS საიტები ვალიდური SSL-ით\n"
+                "✅ HTTPS საიტები არავალიდური SSL-ით\n"
+                "✅ Self-signed certificates\n"
+                "✅ Expired certificates\n"
+                "✅ HTTP საიტები\n"
+                "✅ ყველა სტანდარტული ecommerce სტრუქტურა\n\n"
+                "🚀 *Hosted on Render.com*"
             )
             
             back_keyboard = [[InlineKeyboardButton("🔙 უკან", callback_data='back_to_menu')]]
@@ -790,4 +913,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
