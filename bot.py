@@ -560,43 +560,39 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
     
     # Graceful shutdown handler
-    def signal_handler(signum, frame):
-        print("🛑 ბოტის გაჩერება...")
-        if telegram_bot.product_bot.session:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(telegram_bot.product_bot.close_session())
-                else:
-                    loop.run_until_complete(telegram_bot.product_bot.close_session())
-            except Exception as e:
-                logger.error(f"Error closing session: {e}")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    try:
-        # ბოტის გაშვება (სინქრონული მეთოდი)
-        print("🤖 ბოტი გაშვებულია...")
-        application.run_polling(
-            poll_interval=1.0,
-            timeout=20,
-            bootstrap_retries=-1,
-            close_loop=False
-        )
-    except Exception as e:
-        logger.error(f"Application error: {e}")
-    finally:
-        print("🔄 ბოტი გაჩერდა")
+def signal_handler(signum, frame):
+    print("🛑 ბოტის გაჩერება...")
+    if telegram_bot.product_bot.session:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(telegram_bot.product_bot.close_session())
+            else:
+                loop.run_until_complete(telegram_bot.product_bot.close_session())
+        except Exception as e:
+            logger.error(f"Error closing session: {e}")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+try:
+    # ბოტის გაშვება (სინქრონული მეთოდი)
+    print("🤖 ბოტი გაშვებულია...")
+    application.run_polling(
+        poll_interval=1.0,
+        timeout=20,
+        bootstrap_retries=-1,
+        close_loop=False
+    )
+except Exception as e:
+    logger.error(f"Application error: {e}")
+finally:
+    print("🔄 ბოტი გაჩერდა")
 
 if __name__ == '__main__':
-    main(), '€']):
-                                price = f"{price}"
-                            break
-                    if price:
-                        break
+    main()
             
             # სურათის ძებნა (გაუმჯობესებული)
             image_url = None
@@ -1013,5 +1009,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
