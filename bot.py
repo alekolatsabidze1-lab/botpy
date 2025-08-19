@@ -1,5 +1,7 @@
 import asyncio
 import aiohttp
+import ssl
+import certifi
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -18,11 +20,34 @@ class ProductBot:
         self.session = None
         
     async def init_session(self):
-        """HTTP სესიის ინიციალიზაცია"""
+        """HTTP სესიის ინიციალიზაცია SSL სერტიფიკატებით"""
+        # SSL კონტექსტის შექმნა
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        ssl_context.check_hostname = False  # ზოგიერთი საიტისთვის
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        
+        # HTTP კონექტორი SSL-ით
+        connector = aiohttp.TCPConnector(
+            ssl=ssl_context,
+            limit=100,
+            limit_per_host=10,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=60,
+            enable_cleanup_closed=True
+        )
+        
         self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=30, connect=10),
             headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'ka-GE,ka;q=0.9,en;q=0.8,ru;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
             }
         )
     
@@ -32,20 +57,68 @@ class ProductBot:
             await self.session.close()
     
     async def fetch_website_content(self, url):
-        """საიტიდან კონტენტის მოპოვება"""
+        """საიტიდან კონტენტის მოპოვება SSL მხარდაჭერით"""
         try:
             if not self.session:
                 await self.init_session()
-                
+            
+            # URL-ის ნორმალიზაცია
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            
+            # პირველ რიგში HTTPS-ის მცდელობა
+            if url.startswith('http://'):
+                https_url = url.replace('http://', 'https://', 1)
+                try:
+                    async with self.session.get(https_url) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            return content
+                except Exception:
+                    logger.warning(f"HTTPS failed for {https_url}, trying HTTP...")
+            
+            # ძირითადი მცდელობა
             async with self.session.get(url) as response:
                 if response.status == 200:
                     content = await response.text()
                     return content
+                elif response.status in [301, 302, 303, 307, 308]:
+                    # Redirect handling
+                    redirect_url = str(response.url)
+                    logger.info(f"Redirected to: {redirect_url}")
+                    async with self.session.get(redirect_url) as redirect_response:
+                        if redirect_response.status == 200:
+                            content = await redirect_response.text()
+                            return content
                 else:
                     logger.error(f"HTTP Error {response.status} for URL: {url}")
                     return None
+                    
+        except aiohttp.ClientSSLError as ssl_error:
+            logger.error(f"SSL Error for {url}: {ssl_error}")
+            # SSL შეცდომის შემთხვევაში HTTP-ის მცდელობა
+            if url.startswith('https://'):
+                http_url = url.replace('https://', 'http://', 1)
+                try:
+                    async with self.session.get(http_url) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            logger.warning(f"Fallback to HTTP successful for {http_url}")
+                            return content
+                except Exception as e:
+                    logger.error(f"HTTP fallback also failed: {e}")
+            return None
+            
+        except aiohttp.ClientConnectorError as conn_error:
+            logger.error(f"Connection Error for {url}: {conn_error}")
+            return None
+            
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout Error for URL: {url}")
+            return None
+            
         except Exception as e:
-            logger.error(f"Error fetching {url}: {str(e)}")
+            logger.error(f"Unexpected error fetching {url}: {str(e)}")
             return None
     
     def parse_products(self, html_content, base_url):
@@ -98,13 +171,52 @@ class ProductBot:
                         price = price_match.group()
                     break
             
-            # სურათის ძებნა
+            # სურათის ძებნა (გაუმჯობესებული)
             image_url = None
-            img_elem = item.select_one('img')
-            if img_elem:
-                img_src = img_elem.get('src') or img_elem.get('data-src')
-                if img_src:
-                    image_url = urljoin(base_url, img_src)
+            
+            # პირველი - img ელემენტის ძებნა
+            img_selectors = [
+                'img',
+                '.product-image img',
+                '.image img', 
+                '.photo img',
+                '.thumbnail img'
+            ]
+            
+            for selector in img_selectors:
+                img_elem = item.select_one(selector)
+                if img_elem:
+                    # სხვადასხვა src ატრიბუტების შემოწმება
+                    img_src = (img_elem.get('src') or 
+                              img_elem.get('data-src') or 
+                              img_elem.get('data-lazy-src') or
+                              img_elem.get('data-original') or
+                              img_elem.get('data-srcset'))
+                    
+                    if img_src:
+                        # srcset-ის შემთხვევაში პირველი URL-ის აღება
+                        if 'srcset' in img_elem.get('data-srcset', ''):
+                            img_src = img_src.split(',')[0].split(' ')[0]
+                        
+                        # სრული URL-ის შექმნა
+                        image_url = urljoin(base_url, img_src)
+                        
+                        # სურათის ვალიდაცია
+                        if self.is_valid_image_url(image_url):
+                            break
+            
+            # თუ img ელემენტი ვერ მოიძებნა, background-image-ის ძებნა
+            if not image_url:
+                bg_selectors = ['.product-image', '.image', '.photo', '.thumbnail']
+                for selector in bg_selectors:
+                    bg_elem = item.select_one(selector)
+                    if bg_elem:
+                        style = bg_elem.get('style', '')
+                        bg_match = re.search(r'background-image:\s*url\(["\']?(.*?)["\']?\)', style)
+                        if bg_match:
+                            image_url = urljoin(base_url, bg_match.group(1))
+                            if self.is_valid_image_url(image_url):
+                                break
             
             # ლინკის ძებნა
             link_url = None
@@ -126,21 +238,101 @@ class ProductBot:
         
         return None
     
-    async def format_products_message(self, products, website_name="საიტი"):
-        """პროდუქციის შეტყობინების ფორმატირება"""
+    def is_valid_image_url(self, url):
+        """სურათის URL-ის ვალიდაცია"""
+        if not url or len(url) < 10:
+            return False
+        
+        # ფაილის ექსტენშენის შემოწმება
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']
+        url_lower = url.lower()
+        
+        # URL-ში სურათის ექსტენშენია
+        if any(url_lower.endswith(ext) for ext in image_extensions):
+            return True
+        
+        # ან სურათის ქვეჯგუფი URL-ში
+        image_indicators = ['image', 'img', 'photo', 'picture', 'pic', 'thumb']
+        if any(indicator in url_lower for indicator in image_indicators):
+            return True
+        
+        # data: URL (base64 სურათები)
+        if url.startswith('data:image'):
+            return True
+            
+        return False
+    
+    async def send_products_with_images(self, update, products, website_name="საიტი"):
+        """პროდუქციის გაგზავნა სურათებით"""
         if not products:
-            return "🚫 პროდუქცია არ მოიძებნა."
+            await update.message.reply_text("🚫 პროდუქცია არ მოიძებნა.")
+            return
         
-        message = f"🛍️ *{website_name}*-ის პროდუქცია:\n\n"
+        header_message = f"🛍️ *{website_name}*-ის პროდუქცია:\n\n"
         
-        for i, product in enumerate(products[:5], 1):  # მაქსიმუმ 5 პროდუქტი
-            message += f"{i}. *{product['name']}*\n"
-            message += f"💰 ფასი: `{product['price']}` ₾\n"
-            if product.get('link_url'):
-                message += f"🔗 [მეტის ნახვა]({product['link_url']})\n"
-            message += "\n"
+        # თუ 3-ზე მეტი პროდუქტია, გავაგზავნოთ Media Group
+        limited_products = products[:6]  # მაქსიმუმ 6 პროდუქტი
         
-        return message
+        for i, product in enumerate(limited_products, 1):
+            try:
+                caption = f"*{i}. {product['name']}*\n\n"
+                caption += f"💰 *ფასი:* `{product['price']}` ₾\n"
+                
+                if product.get('link_url'):
+                    caption += f"🔗 [მეტის ნახვა]({product['link_url']})\n"
+                
+                caption += f"\n📊 *საიტი:* {website_name}"
+                
+                # სურათის გაგზავნა
+                if product.get('image_url') and self.is_valid_image_url(product['image_url']):
+                    try:
+                        await update.message.reply_photo(
+                            photo=product['image_url'],
+                            caption=caption,
+                            parse_mode='Markdown'
+                        )
+                    except Exception as img_error:
+                        logger.warning(f"Failed to send image for {product['name']}: {img_error}")
+                        # სურათის გარეშე გაგზავნა
+                        await update.message.reply_text(
+                            f"📦 {caption}\n\n❌ სურათი ვერ ჩაიტვირთა",
+                            parse_mode='Markdown',
+                            disable_web_page_preview=True
+                        )
+                else:
+                    # სურათის გარეშე
+                    await update.message.reply_text(
+                        f"📦 {caption}",
+                        parse_mode='Markdown',
+                        disable_web_page_preview=True
+                    )
+                    
+                # ძალიან სწრაფი გაგზავნის თავიდან ასაცილებლად
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Error sending product {i}: {str(e)}")
+                continue
+    
+    def is_valid_image_url(self, url):
+        """სურათის URL-ის ვალიდაცია"""
+        if not url:
+            return False
+        
+        # ფაილის ექსტენშენის შემოწმება
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+        url_lower = url.lower()
+        
+        # URL-ში სურათის ექსტენშენია
+        if any(url_lower.endswith(ext) for ext in image_extensions):
+            return True
+        
+        # ან სურათის ქვეჯგუფი URL-ში
+        image_indicators = ['image', 'img', 'photo', 'picture', 'pic']
+        if any(indicator in url_lower for indicator in image_indicators):
+            return True
+            
+        return False
 
 # ბოტის კომანდები
 class TelegramBot:
@@ -221,11 +413,12 @@ class TelegramBot:
             # პროდუქციის პარსინგი
             products = self.product_bot.parse_products(html_content, url)
             
-            # შედეგების ფორმატირება
-            website_name = urlparse(url).netloc
-            message = await self.product_bot.format_products_message(products, website_name)
+            # ძებნის შეტყობინების წაშლა
+            await search_message.delete()
             
-            await search_message.edit_text(message, parse_mode='Markdown', disable_web_page_preview=True)
+            # შედეგების ფორმატირება და გაგზავნა სურათებით
+            website_name = urlparse(url).netloc
+            await self.send_products_with_images(update, products, website_name)
             
         except Exception as e:
             logger.error(f"Error processing website: {str(e)}")
