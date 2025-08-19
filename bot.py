@@ -263,7 +263,8 @@ class ProductBot:
                         if price_match:
                             price = price_match.group(1).replace(',', '')
                             # ლარის სიმბოლო დავამატოთ თუ არ არის
-                            #if not any(symbol in price_text for symbol in ['₾', 'ლარი', '
+                            if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+
     
     def is_valid_image_url(self, url):
         """სურათის URL-ის ვალიდაცია"""
@@ -1012,4 +1013,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
