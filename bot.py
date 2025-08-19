@@ -7,6 +7,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from bs4 import BeautifulSoup
 import re
+import json
 from urllib.parse import urljoin, urlparse
 
 # ლოგინგის კონფიგურაცია
@@ -17,25 +18,12 @@ class ProductBot:
     def __init__(self, bot_token):
         self.bot_token = bot_token
         self.session = None
-
+        
     async def init_session(self):
-        """HTTP სესიის ინიციალიზაცია"""
-        ssl_context = ssl.create_default_context(cafile=certifi.where())
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_REQUIRED
-
-        connector = aiohttp.TCPConnector(
-            ssl=ssl_context,
-            limit=20,
-            limit_per_host=5,
-            ttl_dns_cache=300,
-            keepalive_timeout=30,
-            enable_cleanup_closed=True
-        )
-
+        """HTTP სესიის ინიციალიზაცია Render-friendly"""
         self.session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(total=30, connect=15),
+            connector=aiohttp.TCPConnector(ssl=False),  # Render-ზე ბევრ საიტს SSL პრობლემა აქვს
+            timeout=aiohttp.ClientTimeout(total=40),
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -47,13 +35,15 @@ class ProductBot:
                 "Connection": "keep-alive",
             }
         )
-
+    
     async def close_session(self):
+        """სესიის დახურვა"""
         if self.session:
             await self.session.close()
-
+    
     async def fetch_website_content(self, url: str):
-        """საიტიდან კონტენტის მოპოვება"""
+        """Fetch site HTML with aiohttp, fallback to requests if needed"""
+        import requests
         try:
             if not self.session:
                 await self.init_session()
@@ -61,26 +51,51 @@ class ProductBot:
             if not url.startswith(("http://", "https://")):
                 url = "https://" + url
 
-            async with self.session.get(url, ssl=False) as response:
+            async with self.session.get(url) as response:
                 if response.status == 200:
-                    text = await response.text(errors="ignore")
-                    return text
+                    return await response.text(errors="ignore")
                 else:
-                    logger.error(f"Bad status {response.status} for {url}")
-                    return None
-        except aiohttp.ClientConnectorError as e:
-            logger.error(f"Connection error for {url}: {e}")
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout loading {url}")
-        except Exception as e:
-            logger.error(f"Unexpected fetch error for {url}: {e}")
-        return None
+                    logger.warning(f"Aiohttp bad status {response.status} for {url}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Aiohttp error for {url}: {e}")
 
+        # --- fallback to requests ---
+        try:
+            logger.info(f"Trying requests fallback for {url}")
+            r = requests.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/120.0 Safari/537.36"
+                },
+                timeout=20,
+                verify=False
+            )
+            if r.status_code == 200:
+                return r.text
+            else:
+                logger.error(f"Requests bad status {r.status_code} for {url}")
+        except Exception as e:
+            logger.error(f"Requests fallback failed for {url}: {e}")
+
+        return None
+    
     def parse_products(self, html_content, base_url):
+        """HTML-ის პარსინგი პროდუქციის მოსაპოვებლად"""
         soup = BeautifulSoup(html_content, 'html.parser')
         products = []
-        product_selectors = ['.product', '.item', '.product-item', '.product-card', '[class*="product"]', '.card']
-
+        
+        product_selectors = [
+            '.product',
+            '.item',
+            '.product-item',
+            '.product-card',
+            '[class*="product"]',
+            '.card',
+            '.item-card'
+        ]
+        
         for selector in product_selectors:
             items = soup.select(selector)
             if items and len(items) > 1:
@@ -90,149 +105,123 @@ class ProductBot:
                         products.append(product)
                 if products:
                     break
-
+        
         return products
-
+    
     def extract_product_info(self, item, base_url):
+        """ცალკეული პროდუქტის ინფორმაციის ამოღება"""
         try:
-            # სახელი
-            name_elem = item.select_one("h1, h2, h3, h4, .title, .product-name, .item-title, .card-title")
-            name = name_elem.get_text(strip=True) if name_elem else None
-
-            # ფასი
-            price_elem = item.select_one(".price, .cost, [class*='price'], [class*='cost']")
-            price = None
-            if price_elem:
-                price_text = price_elem.get_text(strip=True)
-                match = re.search(r'(\d+(?:[.,]\d{2})?)', price_text.replace(" ", ""))
-                if match:
-                    price = match.group(1) + "₾"
-
-            # სურათი
+            name_elem = item.select_one("h2, h3, .title, .product-name")
+            price_elem = item.select_one(".price, .cost, [class*='price']")
             img_elem = item.select_one("img")
+            
+            name = name_elem.get_text(strip=True) if name_elem else None
+            price = price_elem.get_text(strip=True) if price_elem else None
             image_url = None
-            if img_elem:
-                src = img_elem.get("src") or img_elem.get("data-src")
-                if src:
-                    if src.startswith("//"):
-                        src = "https:" + src
-                    elif src.startswith("/"):
-                        src = urljoin(base_url, src)
-                    image_url = src
-
-            # ლინკი
+            if img_elem and img_elem.get("src"):
+                image_url = urljoin(base_url, img_elem.get("src"))
+            
             link_elem = item.select_one("a")
             link_url = None
             if link_elem and link_elem.get("href"):
-                href = link_elem["href"]
-                if href.startswith("//"):
-                    href = "https:" + href
-                elif href.startswith("/"):
-                    href = urljoin(base_url, href)
-                link_url = href
-
+                link_url = urljoin(base_url, link_elem.get("href"))
+            
             if name and price:
-                return {"name": name[:150], "price": price, "image_url": image_url, "link_url": link_url}
+                return {
+                    "name": name,
+                    "price": price,
+                    "image_url": image_url,
+                    "link_url": link_url
+                }
         except Exception as e:
-            logger.error(f"Extract error: {e}")
+            logger.error(f"Error extracting product info: {e}")
         return None
-
+    
     def is_valid_image_url(self, url):
         if not url:
             return False
-        image_extensions = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
-        return any(url.lower().endswith(ext) for ext in image_extensions)
+        return any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"])
 
     async def send_products_with_images(self, update, products, website_name="საიტი"):
         if not products:
             await update.message.reply_text("🚫 პროდუქცია არ მოიძებნა.")
             return
-
+        
         for i, product in enumerate(products[:6], 1):
-            caption = f"*{i}. {product['name']}*\n💰 {product['price']}"
+            caption = f"*{i}. {product['name']}*\n💰 {product['price']}\n"
             if product.get("link_url"):
-                caption += f"\n🔗 [ნახვა]({product['link_url']})"
-
-            if product.get("image_url") and self.is_valid_image_url(product['image_url']):
+                caption += f"🔗 [ლინკი]({product['link_url']})"
+            
+            if product.get("image_url") and self.is_valid_image_url(product["image_url"]):
                 try:
-                    await update.message.reply_photo(product["image_url"], caption=caption, parse_mode="Markdown")
+                    await update.message.reply_photo(
+                        photo=product["image_url"],
+                        caption=caption,
+                        parse_mode="Markdown"
+                    )
                 except:
                     await update.message.reply_text(caption, parse_mode="Markdown")
             else:
                 await update.message.reply_text(caption, parse_mode="Markdown")
-            await asyncio.sleep(0.3)
-
+            await asyncio.sleep(0.5)
 
 class TelegramBot:
     def __init__(self, bot_token):
+        self.bot_token = bot_token
         self.product_bot = ProductBot(bot_token)
-
+        
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        keyboard = [[InlineKeyboardButton("🛍️ ძებნა", callback_data='search_products')]]
-        await update.message.reply_text("🤖 მოგესალმებით! გამომიგზავნეთ საიტის URL პროდუქციის მოსაძებნად.", 
-                                        reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard = [[InlineKeyboardButton("🛍️ პროდუქციის ძებნა", callback_data='search_products')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text("🤖 მოგესალმებით! გამომიგზავნეთ საიტის ლინკი.", reply_markup=reply_markup)
 
     async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
-            await update.message.reply_text("❗ გამოიყენეთ `/search <url>`")
+            await update.message.reply_text("❗ გამოიყენეთ: `/search <url>`", parse_mode="Markdown")
             return
         url = context.args[0]
         await self.process_website(update, url)
 
     async def handle_url_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = update.message.text.strip()
-        urls = re.findall(r'https?://[^\s]+', text)
+        urls = re.findall(r'https?://[^\s]+', update.message.text)
         if urls:
             await self.process_website(update, urls[0])
         else:
-            await update.message.reply_text("❗ მიუთითეთ სწორი URL")
+            await update.message.reply_text("❗ გთხოვთ გამოგზავნოთ ვალიდური URL")
 
     async def process_website(self, update, url):
         msg = await update.message.reply_text("🔍 ვტვირთავ საიტს...")
         try:
             if not self.product_bot.session:
                 await self.product_bot.init_session()
-
-            html = await self.product_bot.fetch_website_content(url)
-            if not html:
+            html_content = await self.product_bot.fetch_website_content(url)
+            if not html_content:
                 await msg.edit_text("❌ საიტის ჩატვირთვა ვერ მოხერხდა")
                 return
-
-            products = self.product_bot.parse_products(html, url)
+            products = self.product_bot.parse_products(html_content, url)
             await msg.delete()
             await self.product_bot.send_products_with_images(update, products, urlparse(url).netloc)
         except Exception as e:
-            logger.error(f"Process error: {e}")
-            await msg.edit_text("❌ შეცდომა მოხდა")
+            logger.error(f"Error: {e}")
+            await msg.edit_text("❌ მოხდა შეცდომა")
 
 def main():
     import os, signal, sys
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN არ არის დაყენებული!")
+        print("❌ BOT_TOKEN not set!")
         return
-
-    tg = TelegramBot(BOT_TOKEN)
+    telegram_bot = TelegramBot(BOT_TOKEN)
     application = Application.builder().token(BOT_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", tg.start_command))
-    application.add_handler(CommandHandler("search", tg.search_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, tg.handle_url_message))
-
-    def signal_handler(signum, frame):
-        print("🛑 გაჩერება...")
-        if tg.product_bot.session:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(tg.product_bot.close_session())
-            else:
-                loop.run_until_complete(tg.product_bot.close_session())
+    application.add_handler(CommandHandler("start", telegram_bot.start_command))
+    application.add_handler(CommandHandler("search", telegram_bot.search_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
+    def stop_bot(signum, frame):
+        print("🛑 Stop bot")
         sys.exit(0)
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
-    print("🤖 ბოტი გაშვებულია...")
+    signal.signal(signal.SIGINT, stop_bot)
+    signal.signal(signal.SIGTERM, stop_bot)
+    print("🤖 Bot running...")
     application.run_polling()
 
 if __name__ == "__main__":
