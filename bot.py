@@ -218,7 +218,7 @@ class ProductBot:
     
     def extract_product_info(self, item, base_url):
         """ცალკეული პროდუქტის ინფორმაციის ამოღება"""
-     try:
+        try:
             # სახელის ძებნა (raiders.ge-ისთვის გაფართოებული)
             name_selectors = [
                 'h1', 'h2', 'h3', 'h4',
@@ -1018,6 +1018,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
