@@ -314,25 +314,29 @@ class ProductBot:
                 logger.error(f"Error sending product {i}: {str(e)}")
                 continue
     
-    def is_valid_image_url(self, url):
-        """სურათის URL-ის ვალიდაცია"""
-        if not url:
-            return False
-        
-        # ფაილის ექსტენშენის შემოწმება
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
-        url_lower = url.lower()
-        
-        # URL-ში სურათის ექსტენშენია
-        if any(url_lower.endswith(ext) for ext in image_extensions):
-            return True
-        
-        # ან სურათის ქვეჯგუფი URL-ში
-        image_indicators = ['image', 'img', 'photo', 'picture', 'pic']
-        if any(indicator in url_lower for indicator in image_indicators):
-            return True
+    async def check_ssl_certificate(self, url):
+        """SSL სერტიფიკატის შემოწმება"""
+        try:
+            parsed_url = urlparse(url)
+            if parsed_url.scheme != 'https':
+                return True  # HTTP საიტებისთვის SSL შემოწმება არ ჭირდება
             
-        return False
+            import socket
+            import ssl as ssl_module
+            
+            context = ssl_module.create_default_context()
+            
+            with socket.create_connection((parsed_url.hostname, 443), timeout=10) as sock:
+                with context.wrap_socket(sock, server_hostname=parsed_url.hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    if cert:
+                        logger.info(f"SSL Certificate valid for {parsed_url.hostname}")
+                        return True
+            return False
+            
+        except Exception as e:
+            logger.warning(f"SSL check failed for {url}: {e}")
+            return False  # SSL შემოწმება ვერ მოხერხდა, მაგრამ გავაგრძელოთ
 
 # ბოტის კომანდები
 class TelegramBot:
