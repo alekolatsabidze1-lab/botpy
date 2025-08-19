@@ -1,10 +1,101 @@
+import os
 import asyncio
+import logging
+from flask import Flask
+from threading import Thread
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
+
+# Logging setup - ნაკლები verbose ლოგები
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+
+# Flask app Render.com port-ისთვის
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Bot is running!"
+
+@app.route('/health')
+def health():
+    return {"status": "healthy"}
+
+# Telegram Bot Setup
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+
+# Improved request configuration
+request = HTTPXRequest(
+    connection_pool_size=8,
+    read_timeout=30,
+    write_timeout=30,
+    connect_timeout=30,
+    pool_timeout=30
+)
+
+# Bot handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Hello! Bot is working on Render.com!')
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors caused by Updates."""
+    logging.error(f'Update {update} caused error {context.error}')
+
+# Bot setup function
+async def setup_bot():
+    """Setup and run the bot"""
+    try:
+        # Clear any existing webhooks
+        application = Application.builder().token(TOKEN).request(request).build()
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_error_handler(error_handler)
+        
+        # Start polling
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES
+        )
+        
+        # Keep running
+        while True:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logging.error(f"Bot setup error: {e}")
+        await asyncio.sleep(5)  # Wait before retry
+        await setup_bot()  # Retry
+
+def run_bot():
+    """Run bot in asyncio loop"""
+    asyncio.run(setup_bot())
+
+def run_flask():
+    """Run Flask app"""
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+if __name__ == "__main__":
+    # Start Flask in separate thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Start bot
+    import asyncio
 import aiohttp
 import ssl
 import certifi
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.request import HTTPXRequest
 from bs4 import BeautifulSoup
 import re
 import json
@@ -12,10 +103,30 @@ from urllib.parse import urljoin, urlparse
 import os
 import signal
 import sys
+from flask import Flask
+from threading import Thread
+import gc
 
-# ლოგინგის კონფიგურაცია
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+# ლოგინგის კონფიგურაცია - ნაკლები verbose
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+# Flask app Render.com port-ისთვის
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return {"status": "Bot is running!", "service": "Product Search Bot"}
+
+@app.route('/health')
+def health():
+    return {"status": "healthy", "uptime": "running"}
+
+@app.route('/status')
+def status():
+    return {"bot_status": "active", "version": "1.0"}
 
 class ProductBot:
     def __init__(self, bot_token):
@@ -32,36 +143,41 @@ class ProductBot:
         # HTTP კონექტორი SSL-ით
         connector = aiohttp.TCPConnector(
             ssl=ssl_context,
-            limit=100,
-            limit_per_host=10,
+            limit=50,  # შემცირებული limit
+            limit_per_host=5,  # შემცირებული limit
             ttl_dns_cache=300,
             use_dns_cache=True,
-            keepalive_timeout=60,
+            keepalive_timeout=30,  # შემცირებული timeout
             enable_cleanup_closed=True
         )
         
+        # Brotli support headers
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ka-GE,ka;q=0.9,en;q=0.8,ru;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+        }
+        
         self.session = aiohttp.ClientSession(
             connector=connector,
-            timeout=aiohttp.ClientTimeout(total=30, connect=10),
-            headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'ka-GE,ka;q=0.9,en;q=0.8,ru;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Cache-Control': 'max-age=0'
-            }
+            timeout=aiohttp.ClientTimeout(total=20, connect=5),  # შემცირებული timeouts
+            headers=headers
         )
     
     async def close_session(self):
         """სესიის დახურვა"""
         if self.session and not self.session.closed:
             await self.session.close()
+            # Memory cleanup
+            gc.collect()
     
     async def fetch_website_content(self, url):
         """საიტიდან კონტენტის მოპოვება SSL მხარდაჭერით"""
@@ -364,7 +480,7 @@ class ProductBot:
                         disable_web_page_preview=True
                     )
                     
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)  # Rate limiting
                 
             except Exception as e:
                 logger.error(f"Error sending product {i}: {str(e)}")
@@ -413,6 +529,7 @@ class TelegramBot:
             "📍 *გამოყენება:*\n"
             "• გამოაგზავნეთ საიტის URL\n"
             "• ან გამოიყენეთ `/search <URL>` კომანდა\n\n"
+            "🔧 *Render.com-ზე მუშაობს*\n\n"
             "დაწყებისთვის აირჩიეთ ღილაკი:"
         )
         
@@ -512,7 +629,8 @@ class TelegramBot:
                 "3. მოიძიებს პროდუქციასა და ფასებს\n"
                 "4. გამოაგზავნის ინფორმაციას ჩატში\n\n"
                 "🔹 *მხარდაჭერილი საიტები:*\n"
-                "• ყველა საიტი რომელიც HTML სტანდარტული სტრუქტურის აქვს"
+                "• ყველა საიტი რომელიც HTML სტანდარტული სტრუქტურის აქვს\n\n"
+                "🚀 *Render.com-ზე Hosted*"
             )
             
             back_keyboard = [[InlineKeyboardButton("🔙 უკან", callback_data='back_to_menu')]]
@@ -530,6 +648,7 @@ class TelegramBot:
             welcome_text = (
                 "🤖 *მოგესალმებით!*\n\n"
                 "ეს ბოტი დაგეხმარებათ საიტებიდან პროდუქციის ინფორმაციის მოძებნაში.\n\n"
+                "🔧 *Render.com-ზე მუშაობს*\n\n"
                 "დაწყებისთვის აირჩიეთ ღილაკი:"
             )
             
@@ -550,7 +669,8 @@ class TelegramBot:
             "4. გამოაგზავნის ინფორმაციას ჩატში\n\n"
             "🔧 *მაგალითები:*\n"
             "• `https://shop.example.com`\n"
-            "• `/search https://store.example.com`"
+            "• `/search https://store.example.com`\n\n"
+            "🚀 *Hosted on Render.com*"
         )
         
         await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -560,62 +680,108 @@ class TelegramBot:
         if self.product_bot:
             await self.product_bot.close_session()
 
+# Bot setup function
+async def setup_bot(bot_token):
+    """Setup and run the bot"""
+    try:
+        # Better request configuration for Render.com
+        request = HTTPXRequest(
+            connection_pool_size=4,
+            read_timeout=20,
+            write_timeout=20,
+            connect_timeout=10,
+            pool_timeout=20
+        )
+        
+        # Clear any existing webhooks first
+        application = Application.builder().token(bot_token).request(request).build()
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        
+        telegram_bot = TelegramBot(bot_token)
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", telegram_bot.start_command))
+        application.add_handler(CommandHandler("search", telegram_bot.search_command))
+        application.add_handler(CommandHandler("help", telegram_bot.help_command))
+        application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
+        
+        # Error handler
+        async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+            logger.error(f'Update {update} caused error {context.error}')
+        
+        application.add_error_handler(error_handler)
+        
+        # Start polling with better configuration
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=Update.ALL_TYPES,
+            poll_interval=1.0,
+            timeout=10
+        )
+        
+        logger.warning("🤖 Bot started successfully!")
+        
+        # Keep running
+        while True:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"Bot setup error: {e}")
+        await asyncio.sleep(5)
+        # Retry mechanism
+        await setup_bot(bot_token)
+
+def run_bot(bot_token):
+    """Run bot in asyncio loop"""
+    asyncio.run(setup_bot(bot_token))
+
+def run_flask():
+    """Run Flask app for Render.com port binding"""
+    port = int(os.environ.get('PORT', 5000))
+    logger.warning(f"🌐 Starting Flask server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
 def main():
-    """ბოტის გაშვება"""
+    """ბოტის გაშვება Render.com-ისთვის ოპტიმიზებული"""
     # BOT_TOKEN გარემოს ცვლადიდან
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
     
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN გარემოს ცვლადი არ არის დაყენებული!")
+        print("❌ BOT_TOKEN ან TELEGRAM_TOKEN გარემოს ცვლადი არ არის დაყენებული!")
         sys.exit(1)
     
-    telegram_bot = TelegramBot(BOT_TOKEN)
+    print("🚀 Starting bot on Render.com...")
     
-    # Application-ის შექმნა
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Start Flask in separate thread for Render.com port detection
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
     
-    # კომანდების დამატება
-    application.add_handler(CommandHandler("start", telegram_bot.start_command))
-    application.add_handler(CommandHandler("search", telegram_bot.search_command))
-    application.add_handler(CommandHandler("help", telegram_bot.help_command))
-    application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
+    # Give Flask time to start
+    import time
+    time.sleep(2)
     
     # Graceful shutdown handler
     def signal_handler(signum, frame):
         print("🛑 ბოტის გაჩერება...")
-        
-        # Cleanup-ის გაშვება async-ში
-        async def cleanup():
-            await telegram_bot.cleanup()
-        
-        # Event loop-ის მიღება და cleanup-ის გაშვება
-        try:
-            loop = asyncio.get_event_loop()
-            if not loop.is_closed():
-                loop.run_until_complete(cleanup())
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-        
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        print("🤖 ბოტი გაშვებულია...")
-        application.run_polling(
-            poll_interval=1.0,
-            timeout=20,
-            bootstrap_retries=-1,
-            close_loop=False
-        )
+        # Start bot
+        run_bot(BOT_TOKEN)
+    except KeyboardInterrupt:
+        print("📴 ბოტი გაჩერდა მომხმარებლის მიერ")
     except Exception as e:
         logger.error(f"Application error: {e}")
-        # შეცდომის შემთხვევაში cleanup
-        asyncio.run(telegram_bot.cleanup())
+        print(f"❌ ბოტის შეცდომა: {e}")
     finally:
-        print("📴 ბოტი გაჩერდა")
+        print("📴 ბოტი დასრულდა")
 
 if __name__ == '__main__':
     main()
+    run_bot()
