@@ -1,4 +1,9 @@
 import asyncio
+from email.mime import application
+from os import name
+import signal
+import sys
+from typing import Self
 import aiohttp
 import ssl
 import certifi
@@ -213,7 +218,7 @@ class ProductBot:
     
     def extract_product_info(self, item, base_url):
         """ცალკეული პროდუქტის ინფორმაციის ამოღება"""
-        try:
+     try:
             # სახელის ძებნა (raiders.ge-ისთვის გაფართოებული)
             name_selectors = [
                 'h1', 'h2', 'h3', 'h4',
@@ -224,7 +229,7 @@ class ProductBot:
             ]
             name = None
             for selector in name_selectors:
-                name_elem = item.select_one(selector)
+                name_elem = iter.select_one(selector)
                 if name_elem:
                     name_text = name_elem.get_text(strip=True)
                     if len(name_text) > 5:  # მინიმუმ 5 სიმბოლო
@@ -247,7 +252,7 @@ class ProductBot:
             ]
             price = None
             for selector in price_selectors:
-                price_elem = item.select_one(selector)
+                price_elem = iter.select_one(selector)
                 if price_elem:
                     price_text = price_elem.get_text(strip=True)
                     # ფასის ამოღება რეგექსით - ლარი, დოლარი, ევრო
@@ -263,10 +268,10 @@ class ProductBot:
     if price_match:
         price = price_match.group(1).replace(',', '')
         # ლარის სიმბოლო დავამატოთ თუ არ არის
-        if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+        if not any(symbol in price_text for symbol in ['₾', 'ლარი']): # type: ignore
             price = f"{price}₾"  # ან price += "₾"
         break
-if price:
+if price: # type: ignore
     # აქ შეგიძლიათ დამატებითი ლოგიკა დაწეროთ
     pass
 
@@ -566,14 +571,14 @@ def main():
     # Graceful shutdown handler
 def signal_handler(signum, frame):
     print("🛑 ბოტის გაჩერება...")
-    if telegram_bot.product_bot.session:
+    if TelegramBot.product_bot.session:
         import asyncio
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                loop.create_task(telegram_bot.product_bot.close_session())
+                loop.create_task(TelegramBot.product_bot.close_session())
             else:
-                loop.run_until_complete(telegram_bot.product_bot.close_session())
+                loop.run_until_complete(TelegramBot.product_bot.close_session())
         except Exception as e:
             logger.error(f"Error closing session: {e}")
     sys.exit(0)
@@ -599,7 +604,7 @@ if __name__ == '__main__':
     main()
             
             # სურათის ძებნა (გაუმჯობესებული)
-            image_url = None
+image_url = None
             
             # პირველი - img ელემენტის ძებნა
             img_selectors = [
@@ -610,10 +615,10 @@ if __name__ == '__main__':
                 '.thumbnail img',
                 '.item-image img',
                 '.card-img img'
-            ]
+             ]
             
             for selector in img_selectors:
-                img_elem = item.select_one(selector)
+                img_elem = iter.select_one(selector)
                 if img_elem:
                     # სხვადასხვა src ატრიბუტების შემოწმება
                     img_src = (img_elem.get('src') or 
@@ -632,21 +637,21 @@ if __name__ == '__main__':
                         if img_src.startswith('//'):
                             img_src = 'https:' + img_src
                         elif img_src.startswith('/'):
-                            img_src = urljoin(base_url, img_src)
+                            img_src = urljoin(base_url, img_src) # type: ignore
                         elif not img_src.startswith('http'):
-                            img_src = urljoin(base_url, img_src)
+                            img_src = urljoin(base_url, img_src) # type: ignore
                         
                         image_url = img_src
                         
                         # სურათის ვალიდაცია
-                        if self.is_valid_image_url(image_url):
+                        if Self.is_valid_image_url(image_url):
                             break
             
             # თუ img ელემენტი ვერ მოიძებნა, background-image-ის ძებნა
             if not image_url:
                 bg_selectors = ['.product-image', '.image', '.photo', '.thumbnail', '.item-image']
                 for selector in bg_selectors:
-                    bg_elem = item.select_one(selector)
+                    bg_elem = iter.select_one(selector)
                     if bg_elem:
                         style = bg_elem.get('style', '')
                         bg_match = re.search(r'background-image:\s*url\(["\']?(.*?)["\']?\)', style)
@@ -654,35 +659,35 @@ if __name__ == '__main__':
                             bg_url = bg_match.group(1)
                             if bg_url.startswith('//'):
                                 bg_url = 'https:' + bg_url
-                            image_url = urljoin(base_url, bg_url)
-                            if self.is_valid_image_url(image_url):
+                            image_url = urljoin(base_url, bg_url) # type: ignore
+                            if Self.is_valid_image_url(image_url):
                                 break
             
             # ლინკის ძებნა
             link_url = None
-            link_elem = item.select_one('a')
+            link_elem = iter.select_one('a')
             if link_elem:
                 href = link_elem.get('href')
                 if href:
                     if href.startswith('//'):
                         href = 'https:' + href
                     elif href.startswith('/'):
-                        href = urljoin(base_url, href)
+                        href = urljoin(base_url, href) # type: ignore
                     elif not href.startswith('http'):
-                        href = urljoin(base_url, href)
+                        href = urljoin(base_url, href) # type: ignore
                     link_url = href
             
             # შედეგის დაბრუნება
-            if name and price and len(name) > 3:
+            if name and price and len(name) > 3: # type: ignore
                 return {
                     'name': name[:150],  # სახელის შეზღუდვა
-                    'price': price,
+                    'price': price, # type: ignore
                     'image_url': image_url,
                     'link_url': link_url
                 }
                 
         except Exception as e:
-            logger.error(f"Error extracting product info: {str(e)}")
+    logger.error(f"Error extracting product info: {str(e)}")
         
         return None
     
@@ -1013,7 +1018,6 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
 
