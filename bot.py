@@ -9,6 +9,9 @@ from bs4 import BeautifulSoup
 import re
 import json
 from urllib.parse import urljoin, urlparse
+import signal
+import sys
+import os
 
 # ლოგინგის კონფიგურაცია
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -44,7 +47,7 @@ class ProductBot:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
                 'Accept-Language': 'ka-GE,ka;q=0.9,en;q=0.8,ru;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br',  # brotli მხარდაჭერა
+                'Accept-Encoding': 'gzip, deflate, br',
                 'DNT': '1',
                 'Connection': 'keep-alive',
                 'Upgrade-Insecure-Requests': '1',
@@ -214,27 +217,61 @@ class ProductBot:
     def extract_product_info(self, item, base_url):
         """ცალკეული პროდუქტის ინფორმაციის ამოღება"""
         try:
-            # სახელის ძებნა
-            name_selectors = ['h1', 'h2', 'h3', '.title', '.name', '.product-name', '.product-title']
+            # სახელის ძებნა (raiders.ge-ისთვის გაფართოებული)
+            name_selectors = [
+                'h1', 'h2', 'h3', 'h4',
+                '.title', '.name', '.product-name', '.product-title',
+                '.item-title', '.card-title',
+                'a[title]',  # ლინკის title ატრიბუტი
+                '.product-info h3', '.product-info h2'
+            ]
             name = None
             for selector in name_selectors:
                 name_elem = item.select_one(selector)
                 if name_elem:
-                    name = name_elem.get_text(strip=True)
-                    break
+                    name_text = name_elem.get_text(strip=True)
+                    if len(name_text) > 5:  # მინიმუმ 5 სიმბოლო
+                        name = name_text
+                        break
+                
+                # title ატრიბუტის შემოწმება
+                if not name and selector == 'a[title]':
+                    title_attr = name_elem.get('title', '').strip()
+                    if len(title_attr) > 5:
+                        name = title_attr
+                        break
             
-            # ფასის ძებნა
-            price_selectors = ['.price', '.cost', '[class*="price"]', '[class*="cost"]']
+            # ფასის ძებნა (georgia-ური ვალუტისთვის გაფართოებული)
+            price_selectors = [
+                '.price', '.cost', 
+                '[class*="price"]', '[class*="cost"]',
+                '.amount', '.value',
+                '.product-price', '.item-price'
+            ]
             price = None
             for selector in price_selectors:
                 price_elem = item.select_one(selector)
                 if price_elem:
                     price_text = price_elem.get_text(strip=True)
-                    # ფასის ამოღება რეგექსით
-                    price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
-                    if price_match:
-                        price = price_match.group()
-                    break
+                    # ფასის ამოღება რეგექსით - ლარი, დოლარი, ევრო
+                    price_patterns = [
+                        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:₾|ლარი|GEL)',
+                        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:\$|USD)',
+                        r'(\d+(?:,\d{3})*(?:\.\d{2})?)\s*(?:€|EUR)',
+                        r'(\d+(?:,\d{3})*(?:\.\d{2})?)'  # მხოლოდ რიცხვი
+                    ]
+                    
+                    for pattern in price_patterns:
+                        price_match = re.search(pattern, price_text.replace(' ', ''))
+                        if price_match:
+                            price = price_match.group(1).replace(',', '')
+                            # ლარის სიმბოლო დავამატოთ თუ არ არის
+                            if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+                                price = f"{price}₾"
+                            break
+                    
+                    if price:
+                        break
             
             # სურათის ძებნა (გაუმჯობესებული)
             image_url = None
@@ -245,7 +282,9 @@ class ProductBot:
                 '.product-image img',
                 '.image img', 
                 '.photo img',
-                '.thumbnail img'
+                '.thumbnail img',
+                '.item-image img',
+                '.card-img img'
             ]
             
             for selector in img_selectors:
@@ -256,15 +295,23 @@ class ProductBot:
                               img_elem.get('data-src') or 
                               img_elem.get('data-lazy-src') or
                               img_elem.get('data-original') or
-                              img_elem.get('data-srcset'))
+                              img_elem.get('data-srcset') or
+                              img_elem.get('srcset'))
                     
                     if img_src:
                         # srcset-ის შემთხვევაში პირველი URL-ის აღება
-                        if 'srcset' in img_elem.get('data-srcset', ''):
+                        if ',' in img_src:
                             img_src = img_src.split(',')[0].split(' ')[0]
                         
                         # სრული URL-ის შექმნა
-                        image_url = urljoin(base_url, img_src)
+                        if img_src.startswith('//'):
+                            img_src = 'https:' + img_src
+                        elif img_src.startswith('/'):
+                            img_src = urljoin(base_url, img_src)
+                        elif not img_src.startswith('http'):
+                            img_src = urljoin(base_url, img_src)
+                        
+                        image_url = img_src
                         
                         # სურათის ვალიდაცია
                         if self.is_valid_image_url(image_url):
@@ -272,14 +319,17 @@ class ProductBot:
             
             # თუ img ელემენტი ვერ მოიძებნა, background-image-ის ძებნა
             if not image_url:
-                bg_selectors = ['.product-image', '.image', '.photo', '.thumbnail']
+                bg_selectors = ['.product-image', '.image', '.photo', '.thumbnail', '.item-image']
                 for selector in bg_selectors:
                     bg_elem = item.select_one(selector)
                     if bg_elem:
                         style = bg_elem.get('style', '')
                         bg_match = re.search(r'background-image:\s*url\(["\']?(.*?)["\']?\)', style)
                         if bg_match:
-                            image_url = urljoin(base_url, bg_match.group(1))
+                            bg_url = bg_match.group(1)
+                            if bg_url.startswith('//'):
+                                bg_url = 'https:' + bg_url
+                            image_url = urljoin(base_url, bg_url)
                             if self.is_valid_image_url(image_url):
                                 break
             
@@ -289,15 +339,23 @@ class ProductBot:
             if link_elem:
                 href = link_elem.get('href')
                 if href:
-                    link_url = urljoin(base_url, href)
+                    if href.startswith('//'):
+                        href = 'https:' + href
+                    elif href.startswith('/'):
+                        href = urljoin(base_url, href)
+                    elif not href.startswith('http'):
+                        href = urljoin(base_url, href)
+                    link_url = href
             
-            if name and price:
+            # შედეგის დაბრუნება
+            if name and price and len(name) > 3:
                 return {
-                    'name': name[:100],  # სახელის შეზღუდვა
+                    'name': name[:150],  # სახელის შეზღუდვა
                     'price': price,
                     'image_url': image_url,
                     'link_url': link_url
                 }
+                
         except Exception as e:
             logger.error(f"Error extracting product info: {str(e)}")
         
@@ -333,15 +391,13 @@ class ProductBot:
             await update.message.reply_text("🚫 პროდუქცია არ მოიძებნა.")
             return
         
-        header_message = f"🛍️ *{website_name}*-ის პროდუქცია:\n\n"
-        
-        # თუ 3-ზე მეტი პროდუქტია, გავაგზავნოთ Media Group
-        limited_products = products[:6]  # მაქსიმუმ 6 პროდუქტი
+        # მაქსიმუმ 6 პროდუქტი
+        limited_products = products[:6]
         
         for i, product in enumerate(limited_products, 1):
             try:
                 caption = f"*{i}. {product['name']}*\n\n"
-                caption += f"💰 *ფასი:* `{product['price']}` ₾\n"
+                caption += f"💰 *ფასი:* `{product['price']}`\n"
                 
                 if product.get('link_url'):
                     caption += f"🔗 [მეტის ნახვა]({product['link_url']})\n"
@@ -387,9 +443,8 @@ class ProductBot:
                 return True  # HTTP საიტებისთვის SSL შემოწმება არ ჭირდება
             
             import socket
-            import ssl as ssl_module
             
-            context = ssl_module.create_default_context()
+            context = ssl.create_default_context()
             
             with socket.create_connection((parsed_url.hostname, 443), timeout=10) as sock:
                 with context.wrap_socket(sock, server_hostname=parsed_url.hostname) as ssock:
@@ -401,7 +456,7 @@ class ProductBot:
             
         except Exception as e:
             logger.warning(f"SSL check failed for {url}: {e}")
-            return False  # SSL შემოწმება ვერ მოხერხდა, მაგრამ გავაგრძელოთ
+            return False
 
 # ბოტის კომანდები
 class TelegramBot:
@@ -498,7 +553,7 @@ class TelegramBot:
             
             # შედეგების ფორმატირება და გაგზავნა სურათებით
             website_name = f"{ssl_status} {urlparse(url).netloc}"
-            await self.send_products_with_images(update, products, website_name)
+            await self.product_bot.send_products_with_images(update, products, website_name)
             
         except Exception as e:
             logger.error(f"Error processing website: {str(e)}")
@@ -510,7 +565,102 @@ class TelegramBot:
         await query.answer()
         
         if query.data == 'search_products':
-            await query.edit_message_text(
+            await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Help კომანდა"""
+        help_text = (
+            "📖 *დახმარების სექცია*\n\n"
+            "🔹 *კომანდები:*\n"
+            "• `/start` - ბოტის გაშვება\n"
+            "• `/search <URL>` - პროდუქციის ძებნა\n"
+            "• `/help` - დახმარება\n\n"
+            "🔹 *გამოყენება:*\n"
+            "1. გამოგზავნეთ საიტის URL\n"
+            "2. ბოტი გადავა საიტზე\n"
+            "3. მოიძიებს პროდუქციასა და ფასებს\n"
+            "4. გამოგზავნის ინფორმაციას ჩატში\n\n"
+            "📧 *მაგალითები:*\n"
+            "• `https://shop.example.com`\n"
+            "• `/search https://store.example.com`"
+        )
+        
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+
+def main():
+    """ბოტის გაშვება"""
+    # BOT_TOKEN გარემოს ცვლადიდან
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN გარემოს ცვლადი არ არის დაყენებული!")
+        sys.exit(1)
+    
+    # ბოტის ინიციალიზაცია
+    telegram_bot = TelegramBot(BOT_TOKEN)
+    
+    # Application-ის შექმნა
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # კომანდების დამატება
+    application.add_handler(CommandHandler("start", telegram_bot.start_command))
+    application.add_handler(CommandHandler("search", telegram_bot.search_command))
+    application.add_handler(CommandHandler("help", telegram_bot.help_command))
+    application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
+    
+    # Graceful shutdown handler
+    def signal_handler(signum, frame):
+        logger.info("🛑 ბოტის გაჩერება...")
+        try:
+            # სესიის დახურვა sync წესით
+            if telegram_bot.product_bot.session and not telegram_bot.product_bot.session.closed:
+                asyncio.create_task(telegram_bot.product_bot.close_session())
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            sys.exit(0)
+    
+    # Signal handlers-ის რეგისტრაცია
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        logger.info("🤖 ბოტი იწყებს მუშაობას...")
+        
+        # Render.com-ისთვის პორტის გამოყენება (თუ არის)
+        port = int(os.getenv("PORT", 8080))
+        
+        # Webhook-ისთვის მზადება (Render.com-ზე ჩვეულებრივ webhook გამოიყენება)
+        webhook_url = os.getenv("WEBHOOK_URL")
+        
+        if webhook_url:
+            # Webhook მეთოდი
+            logger.info(f"Starting webhook on port {port}")
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=BOT_TOKEN,
+                webhook_url=f"{webhook_url}/{BOT_TOKEN}"
+            )
+        else:
+            # Polling მეთოდი (development-ისთვის)
+            logger.info("Starting polling mode")
+            application.run_polling(
+                poll_interval=2.0,
+                timeout=30,
+                bootstrap_retries=3,
+                close_loop=True
+            )
+            
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+        sys.exit(1)
+    finally:
+        logger.info("🔄 ბოტი გაჩერდა")
+
+if __name__ == '__main__':
+    main()message_text(
                 "📝 გთხოვთ გამოგზავნოთ საიტის URL რომლიდანაც გსურთ პროდუქციის ძებნა:\n\n"
                 "მაგალითი: `https://example.com`",
                 parse_mode='Markdown'
@@ -549,84 +699,4 @@ class TelegramBot:
                 "დაწყებისთვის აირჩიეთ ღილაკი:"
             )
             
-            await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
-    
-    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Help კომანდა"""
-        help_text = (
-            "📖 *დახმარების სექცია*\n\n"
-            "🔹 *კომანდები:*\n"
-            "• `/start` - ბოტის გაშვება\n"
-            "• `/search <URL>` - პროდუქციის ძებნა\n"
-            "• `/help` - დახმარება\n\n"
-            "🔹 *გამოყენება:*\n"
-            "1. გამოგზავნეთ საიტის URL\n"
-            "2. ბოტი გადავა საიტზე\n"
-            "3. მოიძიებს პროდუქციასა და ფასებს\n"
-            "4. გამოგზავნის ინფორმაციას ჩატში\n\n"
-            "📧 *მაგალითები:*\n"
-            "• `https://shop.example.com`\n"
-            "• `/search https://store.example.com`"
-        )
-        
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-
-def main():
-    """ბოტის გაშვება"""
-    import signal
-    import sys
-    
-    # BOT_TOKEN გარემოს ცვლადიდან
-    import os
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN გარემოს ცვლადი არ არის დაყენებული!")
-        return
-    
-    telegram_bot = TelegramBot(BOT_TOKEN)
-    
-    # Application-ის შექმნა
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # კომანდების დამატება
-    application.add_handler(CommandHandler("start", telegram_bot.start_command))
-    application.add_handler(CommandHandler("search", telegram_bot.search_command))
-    application.add_handler(CommandHandler("help", telegram_bot.help_command))
-    application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
-    
-    # Graceful shutdown handler
-    def signal_handler(signum, frame):
-        print("🛑 ბოტის გაჩერება...")
-        if telegram_bot.product_bot.session:
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(telegram_bot.product_bot.close_session())
-                else:
-                    loop.run_until_complete(telegram_bot.product_bot.close_session())
-            except Exception as e:
-                logger.error(f"Error closing session: {e}")
-        sys.exit(0)
-    
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    try:
-        # ბოტის გაშვება (სინქრონული მეთოდი)
-        print("🤖 ბოტი გაშვებულია...")
-        application.run_polling(
-            poll_interval=1.0,
-            timeout=20,
-            bootstrap_retries=-1,
-            close_loop=False
-        )
-    except Exception as e:
-        logger.error(f"Application error: {e}")
-    finally:
-        print("🔄 ბოტი გაჩერდა")
-
-if __name__ == '__main__':
-    main()
+            await query.edit_
