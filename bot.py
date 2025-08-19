@@ -51,26 +51,44 @@ class ProductBot:
     def __init__(self, bot_token):
         self.bot_token = bot_token
         self.session = None
+        self.insecure_session = None
         
     async def init_session(self):
-        """HTTP სესიის ინიციალიზაცია SSL სერტიფიკატებით"""
-        # SSL კონტექსტის შექმნა
+        """HTTP სესიების ინიციალიზაცია SSL და non-SSL-ისთვის"""
+        
+        # SSL კონტექსტის შექმნა უსაფრთხო კავშირებისთვის
         ssl_context = ssl.create_default_context(cafile=certifi.where())
-        ssl_context.check_hostname = False
+        ssl_context.check_hostname = True
         ssl_context.verify_mode = ssl.CERT_REQUIRED
         
-        # HTTP კონექტორი SSL-ით
-        connector = aiohttp.TCPConnector(
+        # არაუსაფრთხო SSL კონტექსტი (self-signed ან expired certificates)
+        insecure_ssl_context = ssl.create_default_context()
+        insecure_ssl_context.check_hostname = False
+        insecure_ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # Secure connector
+        secure_connector = aiohttp.TCPConnector(
             ssl=ssl_context,
-            limit=50,  # შემცირებული limit
-            limit_per_host=5,  # შემცირებული limit
+            limit=50,
+            limit_per_host=5,
             ttl_dns_cache=300,
             use_dns_cache=True,
-            keepalive_timeout=30,  # შემცირებული timeout
+            keepalive_timeout=30,
             enable_cleanup_closed=True
         )
         
-        # Brotli support headers
+        # Insecure connector (for sites with SSL issues)
+        insecure_connector = aiohttp.TCPConnector(
+            ssl=insecure_ssl_context,
+            limit=50,
+            limit_per_host=5,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True
+        )
+        
+        # Standard headers
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
@@ -85,21 +103,33 @@ class ProductBot:
             'Cache-Control': 'max-age=0'
         }
         
+        # Secure session
         self.session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=aiohttp.ClientTimeout(total=20, connect=5),  # შემცირებული timeouts
+            connector=secure_connector,
+            timeout=aiohttp.ClientTimeout(total=20, connect=5),
+            headers=headers
+        )
+        
+        # Insecure session
+        self.insecure_session = aiohttp.ClientSession(
+            connector=insecure_connector,
+            timeout=aiohttp.ClientTimeout(total=20, connect=5),
             headers=headers
         )
     
     async def close_session(self):
-        """სესიის დახურვა"""
+        """სესიების დახურვა"""
         if self.session and not self.session.closed:
             await self.session.close()
-            # Memory cleanup
-            gc.collect()
+        
+        if self.insecure_session and not self.insecure_session.closed:
+            await self.insecure_session.close()
+            
+        # Memory cleanup
+        gc.collect()
     
     async def fetch_website_content(self, url):
-        """საიტიდან კონტენტის მოპოვება SSL მხარდაჭერით"""
+        """საიტიდან კონტენტის მოპოვება ყველა შემთხვევისთვის"""
         try:
             if not self.session:
                 await self.init_session()
@@ -108,64 +138,88 @@ class ProductBot:
             if not url.startswith(('http://', 'https://')):
                 url = 'https://' + url
             
-            headers = {
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
+            # მცდელობა 1: HTTPS secure სესიით
+            if url.startswith('https://'):
+                content = await self._try_fetch_with_session(url, self.session, "HTTPS (secure)")
+                if content:
+                    return content
+            
+            # მცდელობა 2: HTTPS insecure სესიით (self-signed certificates)
+            if url.startswith('https://'):
+                content = await self._try_fetch_with_session(url, self.insecure_session, "HTTPS (insecure)")
+                if content:
+                    return content
+            
+            # მცდელობა 3: HTTP fallback
+            http_url = url.replace('https://', 'http://', 1)
+            content = await self._try_fetch_with_session(http_url, self.session, "HTTP fallback")
+            if content:
+                return content
+                
+            # მცდელობა 4: HTTP with different headers
+            simplified_headers = {
+                'User-Agent': 'Mozilla/5.0 (compatible)',
+                'Accept': 'text/html,*/*',
+                'Accept-Encoding': 'gzip, deflate'
             }
             
-            # HTTPS მცდელობა
-            if url.startswith('http://'):
-                https_url = url.replace('http://', 'https://', 1)
-                try:
-                    async with self.session.get(https_url, headers=headers) as response:
-                        if response.status == 200:
-                            content = await response.text(encoding='utf-8', errors='ignore')
-                            return content
-                except Exception as e:
-                    logger.warning(f"HTTPS failed for {https_url}: {e}, trying HTTP...")
+            content = await self._try_fetch_with_session(
+                http_url, 
+                self.session, 
+                "HTTP simplified",
+                override_headers=simplified_headers
+            )
+            if content:
+                return content
+                
+            logger.error(f"All attempts failed for URL: {url}")
+            return None
+                        
+        except Exception as e:
+            logger.error(f"Unexpected error in fetch_website_content: {str(e)}")
+            return None
+    
+    async def _try_fetch_with_session(self, url, session, method_name, override_headers=None):
+        """კონკრეტული სესიით URL-ის ჩატვირთვის მცდელობა"""
+        try:
+            headers = override_headers if override_headers else {}
             
-            # ძირითადი მცდელობა
-            async with self.session.get(url, headers=headers) as response:
+            logger.info(f"Trying {method_name} for: {url}")
+            
+            async with session.get(url, headers=headers) as response:
                 if response.status == 200:
                     content = await response.text(encoding='utf-8', errors='ignore')
+                    logger.info(f"Success with {method_name} for: {url}")
                     return content
                 elif response.status in [301, 302, 303, 307, 308]:
                     redirect_url = str(response.url)
-                    logger.info(f"Redirected to: {redirect_url}")
-                    async with self.session.get(redirect_url, headers=headers) as redirect_response:
+                    logger.info(f"Redirected from {url} to: {redirect_url} via {method_name}")
+                    
+                    # Follow redirect with same session
+                    async with session.get(redirect_url, headers=headers) as redirect_response:
                         if redirect_response.status == 200:
                             content = await redirect_response.text(encoding='utf-8', errors='ignore')
+                            logger.info(f"Success after redirect with {method_name}")
                             return content
                 else:
-                    logger.error(f"HTTP Error {response.status} for URL: {url}")
+                    logger.warning(f"{method_name} returned status {response.status} for: {url}")
                     return None
                         
         except aiohttp.ClientSSLError as ssl_error:
-            logger.error(f"SSL Error for {url}: {ssl_error}")
-            # SSL შეცდომის შემთხვევაში HTTP-ის მცდელობა
-            if url.startswith('https://'):
-                http_url = url.replace('https://', 'http://', 1)
-                try:
-                    async with self.session.get(http_url, headers={'Accept-Encoding': 'gzip, deflate'}) as response:
-                        if response.status == 200:
-                            content = await response.text(encoding='utf-8', errors='ignore')
-                            logger.warning(f"Fallback to HTTP successful for {http_url}")
-                            return content
-                except Exception as e:
-                    logger.error(f"HTTP fallback also failed: {e}")
+            logger.warning(f"SSL Error with {method_name} for {url}: {ssl_error}")
+            return None
             
         except aiohttp.ClientConnectorError as conn_error:
-            logger.error(f"Connection Error for {url}: {conn_error}")
+            logger.warning(f"Connection Error with {method_name} for {url}: {conn_error}")
+            return None
             
         except asyncio.TimeoutError:
-            logger.error(f"Timeout Error for URL: {url}")
+            logger.warning(f"Timeout with {method_name} for URL: {url}")
+            return None
             
         except Exception as e:
-            logger.error(f"Unexpected error fetching {url}: {str(e)}")
-            
-        return None
+            logger.warning(f"Error with {method_name} for {url}: {str(e)}")
+            return None
     
     def parse_products(self, html_content, base_url):
         """HTML-ის პარსინგი პროდუქციის მოსაპოვებლად"""
@@ -230,7 +284,7 @@ class ProductBot:
                         break
                 
                 if not name and selector == 'a[title]':
-                    title_attr = name_elem.get('title', '').strip()
+                    title_attr = name_elem.get('title', '').strip() if name_elem else ''
                     if len(title_attr) > 5:
                         name = title_attr
                         break
@@ -257,7 +311,7 @@ class ProductBot:
                         price_match = re.search(pattern, price_text.replace(' ', ''))
                         if price_match:
                             price = price_match.group(1).replace(',', '')
-                            if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+                            if not any(symbol in price_text for symbol in ['₾', 'ლარი', 'GEL']):
                                 price = f"{price}₾"
                             break
                     if price:
@@ -405,29 +459,35 @@ class ProductBot:
                 logger.error(f"Error sending product {i}: {str(e)}")
                 continue
 
-    async def check_ssl_certificate(self, url):
-        """SSL სერტიფიკატის შემოწმება"""
+    async def get_ssl_status_display(self, url):
+        """SSL სტატუსის ვიზუალური ინდიკატორი"""
         try:
             parsed_url = urlparse(url)
-            if parsed_url.scheme != 'https':
-                return True
             
-            import socket
-            import ssl as ssl_module
+            if parsed_url.scheme == 'http':
+                return "🔓 HTTP"
             
-            context = ssl_module.create_default_context()
+            if parsed_url.scheme == 'https':
+                # ვცადოთ secure connection
+                try:
+                    import socket
+                    import ssl as ssl_module
+                    
+                    context = ssl_module.create_default_context()
+                    with socket.create_connection((parsed_url.hostname, 443), timeout=5) as sock:
+                        with context.wrap_socket(sock, server_hostname=parsed_url.hostname) as ssock:
+                            cert = ssock.getpeercert()
+                            if cert:
+                                return "🔒 HTTPS (valid SSL)"
+                    return "⚠️ HTTPS (SSL issues)"
+                    
+                except Exception:
+                    return "⚠️ HTTPS (SSL issues)"
             
-            with socket.create_connection((parsed_url.hostname, 443), timeout=10) as sock:
-                with context.wrap_socket(sock, server_hostname=parsed_url.hostname) as ssock:
-                    cert = ssock.getpeercert()
-                    if cert:
-                        logger.info(f"SSL Certificate valid for {parsed_url.hostname}")
-                        return True
-            return False
+            return "❓ Unknown"
             
-        except Exception as e:
-            logger.warning(f"SSL check failed for {url}: {e}")
-            return False
+        except Exception:
+            return "❓ Unknown"
 
 class TelegramBot:
     def __init__(self, bot_token):
@@ -448,7 +508,11 @@ class TelegramBot:
             "📍 *გამოყენება:*\n"
             "• გამოაგზავნეთ საიტის URL\n"
             "• ან გამოიყენეთ `/search <URL>` კომანდა\n\n"
-            "🔧 *Render.com-ზე მუშაობს*\n\n"
+            "🔧 *მხარდაჭერა:*\n"
+            "• HTTP/HTTPS საიტები\n"
+            "• SSL სერთიფიკატის გარეშე საიტები\n"
+            "• Self-signed certificates\n\n"
+            "🚀 *Render.com-ზე მუშაობს*\n\n"
             "დაწყებისთვის აირჩიეთ ღილაკი:"
         )
         
@@ -476,7 +540,15 @@ class TelegramBot:
         if urls:
             await self.process_website(update, urls[0])
         else:
-            await update.message.reply_text("❗ გთხოვთ გამოაგზავნოთ ვალიდური URL")
+            # ვეცადოთ URL-ის ამოცნობა www. ან domain.com ფორმატით
+            domain_pattern = r'(?:www\.)?[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}'
+            domains = re.findall(domain_pattern, text)
+            
+            if domains:
+                url = 'https://' + domains[0]
+                await self.process_website(update, url)
+            else:
+                await update.message.reply_text("❗ გთხოვთ გამოაგზავნოთ ვალიდური URL ან domain")
     
     async def process_website(self, update, url):
         """საიტის დამუშავება"""
@@ -488,7 +560,7 @@ class TelegramBot:
                 await update.message.reply_text("❗ გთხოვთ გამოიყენოთ HTTP ან HTTPS URL")
                 return
         except Exception:
-            await update.message.reply_text("❗ არასწარი URL ფორმატი")
+            await update.message.reply_text("❗ არასწორი URL ფორმატი")
             return
         
         search_message = await update.message.reply_text("🔍 ვძებნი პროდუქციას...")
@@ -497,18 +569,15 @@ class TelegramBot:
             if not self.product_bot.session:
                 await self.product_bot.init_session()
             
-            ssl_status = "🔒" if url.startswith('https://') else "🔓"
-            if url.startswith('https://'):
-                await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status} SSL შემოწმება")
-                ssl_valid = await self.product_bot.check_ssl_certificate(url)
-                ssl_status = "✅🔒" if ssl_valid else "⚠️🔒"
+            # SSL სტატუსის მიღება
+            ssl_status = await self.product_bot.get_ssl_status_display(url)
             
             await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status}")
             
             html_content = await self.product_bot.fetch_website_content(url)
             
             if not html_content:
-                await search_message.edit_text("❌ საიტის ჩატვირთვა ვერ მოხერხდა")
+                await search_message.edit_text(f"❌ საიტის ჩატვირთვა ვერ მოხერხდა\n{ssl_status}")
                 return
             
             await search_message.edit_text(f"🔍 ვანალიზებ პროდუქციას... {ssl_status}")
@@ -532,7 +601,15 @@ class TelegramBot:
         if query.data == 'search_products':
             await query.edit_message_text(
                 "🔍 გთხოვთ გამოაგზავნოთ საიტის URL რომლიდანაც გსურთ პროდუქციის ძებნა:\n\n"
-                "მაგალითი: `https://example.com`",
+                "მაგალითად:\n"
+                "• `https://example.com`\n"
+                "• `http://shop.example.com`\n"
+                "• `example.com` (ავტომატურად დაემატება https://)\n\n"
+                "🔧 *მხარდაჭერილი ტიპები:*\n"
+                "✅ HTTPS (ვალიდური SSL)\n"
+                "✅ HTTPS (არავალიდური SSL)\n"
+                "✅ HTTP საიტები\n"
+                "✅ Self-signed certificates",
                 parse_mode='Markdown'
             )
         elif query.data == 'help':
@@ -547,9 +624,18 @@ class TelegramBot:
                 "2. ბოტი გადავა საიტზე\n"
                 "3. მოიძიებს პროდუქციასა და ფასებს\n"
                 "4. გამოაგზავნის ინფორმაციას ჩატში\n\n"
-                "🔹 *მხარდაჭერილი საიტები:*\n"
-                "• ყველა საიტი რომელიც HTML სტანდარტული სტრუქტურის აქვს\n\n"
-                "🚀 *Render.com-ზე Hosted*"
+                "🔹 *SSL მხარდაჭერა:*\n"
+                "• 🔒 - ვალიდური SSL სერთიფიკატი\n"
+                "• ⚠️ - SSL შეცდომები (მაგრამ მუშაობს)\n"
+                "• 🔓 - HTTP (არაუსაფრთხო)\n\n"
+                "🔹 *მხარდაჭერილი საიტების ტიპები:*\n"
+                "✅ HTTPS საიტები ვალიდური SSL-ით\n"
+                "✅ HTTPS საიტები არავალიდური SSL-ით\n"
+                "✅ Self-signed certificates\n"
+                "✅ Expired certificates\n"
+                "✅ HTTP საიტები\n"
+                "✅ ყველა სტანდარტული ecommerce სტრუქტურა\n\n"
+                "🚀 *Hosted on Render.com*"
             )
             
             back_keyboard = [[InlineKeyboardButton("🔙 უკან", callback_data='back_to_menu')]]
@@ -704,3 +790,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
