@@ -258,16 +258,345 @@ class ProductBot:
                         r'(\d+(?:,\d{3})*(?:\.\d{2})?)'  # მხოლოდ რიცხვი
                     ]
                     
-                    for pattern in price_patterns:
-                        price_match = re.search(pattern, price_text.replace(' ', ''))
-                        if price_match:
-                            price = price_match.group(1).replace(',', '')
-                            # ლარის სიმბოლო დავამატოთ თუ არ არის
-                            if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
-                                price = f"{price}₾"
-                            break
-                    if price:
-                        break
+           for pattern in price_patterns:
+    price_match = re.search(pattern, price_text.replace(' ', ''))
+    if price_match:
+        price = price_match.group(1).replace(',', '')
+        # ლარის სიმბოლო დავამატოთ თუ არ არის
+        if not any(symbol in price_text for symbol in ['₾', 'ლარი']):
+            price = f"{price}₾"  # ან price += "₾"
+        break
+if price:
+    # აქ შეგიძლიათ დამატებითი ლოგიკა დაწეროთ
+    pass
+
+def is_valid_image_url(self, url):
+    """სურათის URL-ის ვალიდაცია"""
+    if not url or len(url) < 10:
+        return False
+    # დანარჩენი კოდი...
+        # ფაილის ექსტენშენის შემოწმება
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg']
+        url_lower = url.lower()
+        
+        # URL-ში სურათის ექსტენშენია
+        if any(url_lower.endswith(ext) for ext in image_extensions):
+            return True
+        
+        # ან სურათის ქვეჯგუფი URL-ში
+        image_indicators = ['image', 'img', 'photo', 'picture', 'pic', 'thumb']
+        if any(indicator in url_lower for indicator in image_indicators):
+            return True
+        
+        # data: URL (base64 სურათები)
+        if url.startswith('data:image'):
+            return True
+            
+        return False
+    
+    async def send_products_with_images(self, update, products, website_name="საიტი"):
+        """პროდუქციის გაგზავნა სურათებით"""
+        if not products:
+            await update.message.reply_text("🚫 პროდუქცია არ მოიძებნა.")
+            return
+        
+        header_message = f"🛍️ *{website_name}*-ის პროდუქცია:\n\n"
+        
+        # თუ 3-ზე მეტი პროდუქტია, გავაგზავნოთ Media Group
+        limited_products = products[:6]  # მაქსიმუმ 6 პროდუქტი
+        
+        for i, product in enumerate(limited_products, 1):
+            try:
+                caption = f"*{i}. {product['name']}*\n\n"
+                caption += f"💰 *ფასი:* `{product['price']}` ₾\n"
+                
+                if product.get('link_url'):
+                    caption += f"🔗 [მეტის ნახვა]({product['link_url']})\n"
+                
+                caption += f"\n📊 *საიტი:* {website_name}"
+                
+                # სურათის გაგზავნა
+                if product.get('image_url') and self.is_valid_image_url(product['image_url']):
+                    try:
+                        await update.message.reply_photo(
+                            photo=product['image_url'],
+                            caption=caption,
+                            parse_mode='Markdown'
+                        )
+                    except Exception as img_error:
+                        logger.warning(f"Failed to send image for {product['name']}: {img_error}")
+                        # სურათის გარეშე გაგზავნა
+                        await update.message.reply_text(
+                            f"📦 {caption}\n\n❌ სურათი ვერ ჩაიტვირთა",
+                            parse_mode='Markdown',
+                            disable_web_page_preview=True
+                        )
+                else:
+                    # სურათის გარეშე
+                    await update.message.reply_text(
+                        f"📦 {caption}",
+                        parse_mode='Markdown',
+                        disable_web_page_preview=True
+                    )
+                    
+                # ძალიან სწრაფი გაგზავნის თავიდან ასაცილებლად
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Error sending product {i}: {str(e)}")
+                continue
+    
+    async def check_ssl_certificate(self, url):
+        """SSL სერტიფიკატის შემოწმება"""
+        try:
+            parsed_url = urlparse(url)
+            if parsed_url.scheme != 'https':
+                return True  # HTTP საიტებისთვის SSL შემოწმება არ ჭირდება
+            
+            import socket
+            import ssl as ssl_module
+            
+            context = ssl_module.create_default_context()
+            
+            with socket.create_connection((parsed_url.hostname, 443), timeout=10) as sock:
+                with context.wrap_socket(sock, server_hostname=parsed_url.hostname) as ssock:
+                    cert = ssock.getpeercert()
+                    if cert:
+                        logger.info(f"SSL Certificate valid for {parsed_url.hostname}")
+                        return True
+            return False
+            
+        except Exception as e:
+            logger.warning(f"SSL check failed for {url}: {e}")
+            return False  # SSL შემოწმება ვერ მოხერხდა, მაგრამ გავაგრძელოთ
+
+# ბოტის კომანდები
+class TelegramBot:
+    def __init__(self, bot_token):
+        self.bot_token = bot_token
+        self.product_bot = ProductBot(bot_token)
+        
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start კომანდა"""
+        keyboard = [
+            [InlineKeyboardButton("🛍️ პროდუქციის ძებნა", callback_data='search_products')],
+            [InlineKeyboardButton("ℹ️ დახმარება", callback_data='help')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_text = (
+            "🤖 *მოგესალმებით!*\n\n"
+            "ეს ბოტი დაგეხმარებათ საიტებიდან პროდუქციის ინფორმაციის მოძებნაში.\n\n"
+            "📝 *გამოყენება:*\n"
+            "• გამოგზავნეთ საიტის URL\n"
+            "• ან გამოიყენეთ `/search <URL>` კომანდა\n\n"
+            "დაწყებისთვის აირჩიეთ ღილაკი:"
+        )
+        
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Search კომანდა"""
+        if not context.args:
+            await update.message.reply_text("❗ გთხოვთ მიუთითოთ საიტის URL\n\nმაგალითი: `/search https://example.com`", parse_mode='Markdown')
+            return
+        
+        url = context.args[0]
+        await self.process_website(update, url)
+    
+    async def handle_url_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """URL შეტყობინების დამუშავება"""
+        text = update.message.text
+        
+        # URL-ის შემოწმება
+        url_pattern = r'https?://[^\s]+'
+        urls = re.findall(url_pattern, text)
+        
+        if urls:
+            await self.process_website(update, urls[0])
+        else:
+            await update.message.reply_text("❗ გთხოვთ გამოგზავნოთ ვალიდური URL")
+    
+    async def process_website(self, update, url):
+        """საიტის დამუშავება"""
+        # URL-ის ვალიდაცია
+        try:
+            parsed_url = urlparse(url)
+            if not parsed_url.scheme:
+                url = 'https://' + url
+            elif parsed_url.scheme not in ['http', 'https']:
+                await update.message.reply_text("❗ გთხოვთ გამოიყენოთ HTTP ან HTTPS URL")
+                return
+        except Exception:
+            await update.message.reply_text("❗ არასწორი URL ფორმატი")
+            return
+        
+        # ძებნის შეტყობინება
+        search_message = await update.message.reply_text("🔍 ვძებნი პროდუქციას...")
+        
+        try:
+            # HTTP სესიის ინიციალიზაცია (თუ არ არის)
+            if not self.product_bot.session:
+                await self.product_bot.init_session()
+            
+            # SSL შემოწმება (HTTPS საიტებისთვის)
+            ssl_status = "🔐" if url.startswith('https://') else "🔓"
+            if url.startswith('https://'):
+                await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status} SSL შემოწმება")
+                ssl_valid = await self.product_bot.check_ssl_certificate(url)
+                ssl_status = "✅🔐" if ssl_valid else "⚠️🔐"
+            
+            await search_message.edit_text(f"🔍 ვძებნი პროდუქციას... {ssl_status}")
+            
+            # საიტის კონტენტის მოპოვება
+            html_content = await self.product_bot.fetch_website_content(url)
+            
+            if not html_content:
+                await search_message.edit_text("❌ საიტის ჩატვირთვა ვერ მოხერხდა")
+                return
+            
+            await search_message.edit_text(f"🔍 ვანალიზებ პროდუქციას... {ssl_status}")
+            
+            # პროდუქციის პარსინგი
+            products = self.product_bot.parse_products(html_content, url)
+            
+            # ძებნის შეტყობინების წაშლა
+            await search_message.delete()
+            
+            # შედეგების ფორმატირება და გაგზავნა სურათებით
+            website_name = f"{ssl_status} {urlparse(url).netloc}"
+            await self.send_products_with_images(update, products, website_name)
+            
+        except Exception as e:
+            logger.error(f"Error processing website: {str(e)}")
+            await search_message.edit_text("❌ პროდუქციის ძებნისას მოხდა შეცდომა")
+    
+    async def button_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """ღილაკების callback"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == 'search_products':
+            await query.edit_message_text(
+                "📝 გთხოვთ გამოგზავნოთ საიტის URL რომლიდანაც გსურთ პროდუქციის ძებნა:\n\n"
+                "მაგალითი: `https://example.com`",
+                parse_mode='Markdown'
+            )
+        elif query.data == 'help':
+            help_text = (
+                "📖 *დახმარების სექცია*\n\n"
+                "🔹 *კომანდები:*\n"
+                "• `/start` - ბოტის გაშვება\n"
+                "• `/search <URL>` - პროდუქციის ძებნა\n"
+                "• `/help` - დახმარება\n\n"
+                "🔹 *გამოყენება:*\n"
+                "1. გამოგზავნეთ საიტის URL\n"
+                "2. ბოტი გადავა საიტზე\n"
+                "3. მოიძიებს პროდუქციასა და ფასებს\n"
+                "4. გამოგზავნის ინფორმაციას ჩატში\n\n"
+                "🔹 *მხარდაჭერილი საიტები:*\n"
+                "• ყველა საიტი რომელიც HTML სტანდარტული სტრუქტურის აქვს"
+            )
+            
+            back_keyboard = [[InlineKeyboardButton("🔙 უკან", callback_data='back_to_menu')]]
+            back_markup = InlineKeyboardMarkup(back_keyboard)
+            
+            await query.edit_message_text(help_text, reply_markup=back_markup, parse_mode='Markdown')
+        
+        elif query.data == 'back_to_menu':
+            keyboard = [
+                [InlineKeyboardButton("🛍️ პროდუქციის ძებნა", callback_data='search_products')],
+                [InlineKeyboardButton("ℹ️ დახმარება", callback_data='help')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            welcome_text = (
+                "🤖 *მოგესალმებით!*\n\n"
+                "ეს ბოტი დაგეხმარებათ საიტებიდან პროდუქციის ინფორმაციის მოძებნაში.\n\n"
+                "დაწყებისთვის აირჩიეთ ღილაკი:"
+            )
+            
+            await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Help კომანდა"""
+        help_text = (
+            "📖 *დახმარების სექცია*\n\n"
+            "🔹 *კომანდები:*\n"
+            "• `/start` - ბოტის გაშვება\n"
+            "• `/search <URL>` - პროდუქციის ძებნა\n"
+            "• `/help` - დახმარება\n\n"
+            "🔹 *გამოყენება:*\n"
+            "1. გამოგზავნეთ საიტის URL\n"
+            "2. ბოტი გადავა საიტზე\n"
+            "3. მოიძიებს პროდუქციასა და ფასებს\n"
+            "4. გამოგზავნის ინფორმაციას ჩატში\n\n"
+            "📧 *მაგალითები:*\n"
+            "• `https://shop.example.com`\n"
+            "• `/search https://store.example.com`"
+        )
+        
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+
+def main():
+    """ბოტის გაშვება"""
+    import signal
+    import sys
+    
+    # BOT_TOKEN გარემოს ცვლადიდან
+    import os
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN გარემოს ცვლადი არ არის დაყენებული!")
+        return
+    
+    telegram_bot = TelegramBot(BOT_TOKEN)
+    
+    # Application-ის შექმნა
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # კომანდების დამატება
+    application.add_handler(CommandHandler("start", telegram_bot.start_command))
+    application.add_handler(CommandHandler("search", telegram_bot.search_command))
+    application.add_handler(CommandHandler("help", telegram_bot.help_command))
+    application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
+    
+    # Graceful shutdown handler
+def signal_handler(signum, frame):
+    print("🛑 ბოტის გაჩერება...")
+    if telegram_bot.product_bot.session:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(telegram_bot.product_bot.close_session())
+            else:
+                loop.run_until_complete(telegram_bot.product_bot.close_session())
+        except Exception as e:
+            logger.error(f"Error closing session: {e}")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+try:
+    # ბოტის გაშვება (სინქრონული მეთოდი)
+    print("🤖 ბოტი გაშვებულია...")
+    application.run_polling(
+        poll_interval=1.0,
+        timeout=20,
+        bootstrap_retries=-1,
+        close_loop=False
+    )
+except Exception as e:
+    logger.error(f"Application error: {e}")
+finally:
+    print("🔄 ბოტი გაჩერდა")
+
+if __name__ == '__main__':
+    main()
             
             # სურათის ძებნა (გაუმჯობესებული)
             image_url = None
@@ -395,7 +724,7 @@ class ProductBot:
         for i, product in enumerate(limited_products, 1):
             try:
                 caption = f"*{i}. {product['name']}*\n\n"
-                caption += f"💰 *ფასი:* `{product['price']}`\n"
+                caption += f"💰 *ფასი:* `{product['price']}` ₾\n"
                 
                 if product.get('link_url'):
                     caption += f"🔗 [მეტის ნახვა]({product['link_url']})\n"
@@ -456,7 +785,6 @@ class ProductBot:
         except Exception as e:
             logger.warning(f"SSL check failed for {url}: {e}")
             return False  # SSL შემოწმება ვერ მოხერხდა, მაგრამ გავაგრძელოთ
-
 
 # ბოტის კომანდები
 class TelegramBot:
@@ -553,7 +881,7 @@ class TelegramBot:
             
             # შედეგების ფორმატირება და გაგზავნა სურათებით
             website_name = f"{ssl_status} {urlparse(url).netloc}"
-            await self.product_bot.send_products_with_images(update, products, website_name)
+            await self.send_products_with_images(update, products, website_name)
             
         except Exception as e:
             logger.error(f"Error processing website: {str(e)}")
@@ -599,4 +927,89 @@ class TelegramBot:
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             welcome_text = (
-                "🤖 *მოგესალმებით!*\n\
+                "🤖 *მოგესალმებით!*\n\n"
+                "ეს ბოტი დაგეხმარებათ საიტებიდან პროდუქციის ინფორმაციის მოძებნაში.\n\n"
+                "დაწყებისთვის აირჩიეთ ღილაკი:"
+            )
+            
+            await query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode='Markdown')
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Help კომანდა"""
+        help_text = (
+            "📖 *დახმარების სექცია*\n\n"
+            "🔹 *კომანდები:*\n"
+            "• `/start` - ბოტის გაშვება\n"
+            "• `/search <URL>` - პროდუქციის ძებნა\n"
+            "• `/help` - დახმარება\n\n"
+            "🔹 *გამოყენება:*\n"
+            "1. გამოგზავნეთ საიტის URL\n"
+            "2. ბოტი გადავა საიტზე\n"
+            "3. მოიძიებს პროდუქციასა და ფასებს\n"
+            "4. გამოგზავნის ინფორმაციას ჩატში\n\n"
+            "📧 *მაგალითები:*\n"
+            "• `https://shop.example.com`\n"
+            "• `/search https://store.example.com`"
+        )
+        
+        await update.message.reply_text(help_text, parse_mode='Markdown')
+
+def main():
+    """ბოტის გაშვება"""
+    import signal
+    import sys
+    
+    # BOT_TOKEN გარემოს ცვლადიდან
+    import os
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    
+    if not BOT_TOKEN:
+        print("❌ BOT_TOKEN გარემოს ცვლადი არ არის დაყენებული!")
+        return
+    
+    telegram_bot = TelegramBot(BOT_TOKEN)
+    
+    # Application-ის შექმნა
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # კომანდების დამატება
+    application.add_handler(CommandHandler("start", telegram_bot.start_command))
+    application.add_handler(CommandHandler("search", telegram_bot.search_command))
+    application.add_handler(CommandHandler("help", telegram_bot.help_command))
+    application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
+    
+    # Graceful shutdown handler
+    def signal_handler(signum, frame):
+        print("🛑 ბოტის გაჩერება...")
+        if telegram_bot.product_bot.session:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(telegram_bot.product_bot.close_session())
+                else:
+                    loop.run_until_complete(telegram_bot.product_bot.close_session())
+            except Exception as e:
+                logger.error(f"Error closing session: {e}")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        # ბოტის გაშვება (სინქრონული მეთოდი)
+        print("🤖 ბოტი გაშვებულია...")
+        application.run_polling(
+            poll_interval=1.0,
+            timeout=20,
+            bootstrap_retries=-1,
+            close_loop=False
+        )
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+    finally:
+        print("🔄 ბოტი გაჩერდა")
+
+if __name__ == '__main__':
+    main()
