@@ -207,6 +207,10 @@ class TelegramBot:
         search_message = await update.message.reply_text("🔍 ვძებნი პროდუქციას...")
         
         try:
+            # HTTP სესიის ინიციალიზაცია (თუ არ არის)
+            if not self.product_bot.session:
+                await self.product_bot.init_session()
+            
             # საიტის კონტენტის მოპოვება
             html_content = await self.product_bot.fetch_website_content(url)
             
@@ -294,8 +298,11 @@ class TelegramBot:
         
         await update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def main():
+def main():
     """ბოტის გაშვება"""
+    import signal
+    import sys
+    
     # BOT_TOKEN გარემოს ცვლადიდან
     import os
     BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -309,9 +316,6 @@ async def main():
     # Application-ის შექმნა
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # HTTP სესიის ინიციალიზაცია
-    await telegram_bot.product_bot.init_session()
-    
     # კომანდების დამატება
     application.add_handler(CommandHandler("start", telegram_bot.start_command))
     application.add_handler(CommandHandler("search", telegram_bot.search_command))
@@ -319,13 +323,37 @@ async def main():
     application.add_handler(CallbackQueryHandler(telegram_bot.button_callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, telegram_bot.handle_url_message))
     
+    # Graceful shutdown handler
+    def signal_handler(signum, frame):
+        print("🛑 ბოტის გაჩერება...")
+        if telegram_bot.product_bot.session:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(telegram_bot.product_bot.close_session())
+                else:
+                    loop.run_until_complete(telegram_bot.product_bot.close_session())
+            except Exception as e:
+                logger.error(f"Error closing session: {e}")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
-        # ბოტის გაშვება
+        # ბოტის გაშვება (სინქრონული მეთოდი)
         print("🤖 ბოტი გაშვებულია...")
-        await application.run_polling()
+        application.run_polling(
+            poll_interval=1.0,
+            timeout=20,
+            bootstrap_retries=-1,
+            close_loop=False
+        )
+    except Exception as e:
+        logger.error(f"Application error: {e}")
     finally:
-        # სესიის დახურვა
-        await telegram_bot.product_bot.close_session()
+        print("🔄 ბოტი გაჩერდა")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
