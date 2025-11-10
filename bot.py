@@ -5,7 +5,7 @@ import fetch from "node-fetch";
 const app = express();
 app.use(bodyParser.json());
 
-const PAGE_ACCESS_TOKEN = "შენი_PAGE_ACCESS_TOKEN"; // ჩასვი შენი ტოკენი აქ
+const PAGE_ACCESS_TOKEN = "EAAT94bylvZAkBPZB2qPFn8LDrcZBP3IXJZA2JZB4Dv0kr8g0fZBHLpEtX6j0YgecyUpewlf6064LdMOwZC6xWfkknsoZBZBa1p9A66lmbwpraBzbuMcon1BHom1bX9wx7ZBdv7lVdhIcrmiJiYln86rImZCZAzni0Mk0qtvhfbh8nfWrStzmFXVb1fzsxcYZCUpvV1hilctioxFZBFWJfaM5LeoNe7SzUmXwZDZD"; // ჩასვი შენი ტოკენი აქ
 
 // ვებჰუქის შემოსული შეტყობინება
 app.post("/webhook", async (req, res) => {
@@ -62,3 +62,4 @@ app.get("/webhook", (req, res) => {
 });
 
 app.listen(3000, () => console.log("✅ Raiders GE Messenger bot is running"));
+
